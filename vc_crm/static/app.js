@@ -369,12 +369,38 @@ async function editRecord(entity, row, after, defaults = {}) {
     <div data-extra></div>`);
   const form = $("form", d);
   if (ro) form.querySelectorAll("input,select,textarea").forEach((x) => (x.disabled = true));
+  // Adding a prospect to the pipeline: allow typing a brand-new LP instead of
+  // having to create it on the LPs screen first.
+  const newLp = isNew && entity === "commitments" && canCreateShared() && !defaults.lp_id;
+  if (newLp) {
+    const label = document.createElement("label");
+    label.innerHTML = `Or new LP name<input type="text" name="_new_lp" placeholder="Type to create a new LP">`;
+    form.elements.lp_id.closest("label").after(label);
+    if (!Object.keys(S.look.lps).length) form.elements._new_lp.focus();
+  }
   $("[data-cancel]", d).onclick = closeDrawer;
   const save = $("[data-save]", d);
   if (save) save.onclick = () => guard(async () => {
     const body = formValues(form, fields, isNew ? null : row);
-    if (isNew) await api("POST", `/api/${entity}`, body);
-    else if (Object.keys(body).length) await api("PATCH", `/api/${entity}/${row.id}`, body);
+    let createdLp = null;
+    if (newLp) {
+      const name = form.elements._new_lp.value.trim();
+      if (name && body.lp_id) throw new Error("Choose an existing LP or type a new LP name, not both.");
+      if (!name && !body.lp_id) throw new Error("Choose an LP, or type a new LP name.");
+      if (name) {
+        createdLp = await api("POST", "/api/lps", { name });
+        body.lp_id = createdLp.id;
+      }
+    }
+    if (isNew) {
+      try {
+        await api("POST", `/api/${entity}`, body);
+      } catch (err) {
+        // Do not leave a stray LP behind if the pipeline entry was refused.
+        if (createdLp) await api("DELETE", `/api/lps/${createdLp.id}`).catch(() => {});
+        throw err;
+      }
+    } else if (Object.keys(body).length) await api("PATCH", `/api/${entity}/${row.id}`, body);
     toast("Saved");
     closeDrawer();
     await loadLookups();
