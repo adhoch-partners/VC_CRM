@@ -135,6 +135,7 @@ class Database:
 ADDED_COLUMNS = [
     ("activities", "created_by", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
     ("investments", "round_id", "INTEGER REFERENCES rounds(id) ON DELETE SET NULL"),
+    ("audit_log", "record", "TEXT"),
 ]
 
 

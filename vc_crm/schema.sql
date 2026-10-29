@@ -28,7 +28,16 @@ CREATE TABLE IF NOT EXISTS audit_log (
     entity    TEXT NOT NULL,
     entity_id INTEGER,
     changes   TEXT,
+    record    TEXT,
     at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Other records whose history should also show an audit entry
+-- (a commitment change shows on its LP and its fund).
+CREATE TABLE IF NOT EXISTS audit_links (
+    audit_id  INTEGER NOT NULL REFERENCES audit_log(id) ON DELETE CASCADE,
+    entity    TEXT NOT NULL,
+    entity_id INTEGER NOT NULL
 );
 
 -- ---------------------------------------------------------------- Fundraising
@@ -248,3 +257,4 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_rounds_company ON rounds(company_id);
 CREATE INDEX IF NOT EXISTS idx_round_investors_round ON round_investors(round_id);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id);
+CREATE INDEX IF NOT EXISTS idx_audit_links ON audit_links(entity, entity_id);

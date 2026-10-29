@@ -488,23 +488,113 @@ async function activityLog(el, entity, id, writable) {
   await draw();
 }
 
-const ACTION_LABEL = { create: "created", update: "updated", delete: "deleted", password_change: "changed password" };
+const ACTION_LABEL = { create: "created", update: "updated", delete: "deleted", password_change: "changed their password" };
+const ENTITY_NOUN = {
+  commitments: "pipeline entry", investments: "investment", valuations: "valuation", realizations: "realization",
+  capital_events: "capital event", rounds: "round", round_investors: "round investor", activities: "activity",
+  lps: "LP", companies: "company", funds: "fund", investors: "investor", users: "user",
+};
+const USER_FIELDS = [
+  { name: "name", label: "Name", type: "text" }, { name: "email", label: "Email", type: "text" },
+  { name: "role", label: "General role", type: "text" }, { name: "active", label: "Active", type: "text" },
+  { name: "password", label: "Password", type: "text" },
+];
 
-function describeChange(e) {
-  if (e.action !== "update" || !e.changes) return "";
-  return Object.entries(e.changes).map(([k, v]) => {
-    if (v && typeof v === "object" && "to" in v) return `${k}: ${v.from ?? "(blank)"} → ${v.to ?? "(blank)"}`;
-    return `${k}: ${v}`;
-  }).join("; ");
+function historyFields(entity) {
+  if (entity === "capital_events") return S.meta.capital_event_fields;
+  if (entity === "users") return USER_FIELDS;
+  return S.meta.entities[entity]?.fields ?? [];
 }
 
+/** Plain-text value for the history list: labels for linked records, $K/$M for money. */
+function historyValue(field, v) {
+  if (v == null || v === "") return "(blank)";
+  if (!field) return typeof v === "object" ? JSON.stringify(v) : String(v);
+  switch (field.type) {
+    case "money": return fmt.money(v);
+    case "ref": return refLabel(field.ref, v);
+    case "percent": return `${v}%`;
+    case "number": case "integer": return fmt.num(v);
+    case "longtext": return String(v).length > 120 ? `${String(v).slice(0, 120)}...` : String(v);
+    default: return String(v);
+  }
+}
+
+/** Which record a history entry is about, when it is a related (child) record. */
+function historySubject(e) {
+  const r = e.record || {};
+  const co = refLabel("companies", r.company_id);
+  switch (e.entity) {
+    case "commitments": return `${refLabel("lps", r.lp_id)} / ${refLabel("funds", r.fund_id)}`;
+    case "investments": return `${co} · ${refLabel("funds", r.fund_id)} · ${fmt.money(r.amount)} on ${r.investment_date ?? ""}`;
+    case "valuations": return `${co} · mark of ${r.valuation_date ?? ""}`;
+    case "realizations": return `${co} · ${r.realization_type ?? ""} ${r.realization_date ?? ""}`;
+    case "capital_events": return `${r.event_type ?? ""} of ${r.event_date ?? ""} · ${fmt.money(r.total_amount)}`;
+    case "rounds": return r.company_id ? roundLabel(r) : "";
+    case "round_investors": return `${refLabel("investors", r.investor_id)} in ${S.look.rounds[r.round_id]?.name ?? "a round"}`;
+    case "activities": return `${r.kind ?? "Note"}: ${historyValue({ type: "longtext" }, r.summary)}`;
+    default: return r.name ?? "";
+  }
+}
+
+function historyLines(e) {
+  const fields = Object.fromEntries(historyFields(e.entity).map((f) => [f.name, f]));
+  const c = e.changes || {};
+  if (e.entity === "capital_events" && "paid" in c) {
+    return [`${c.lp ?? "LP"}: marked ${c.paid.to ? "paid" : "not paid"}`];
+  }
+  if (e.entity === "users" && c.fund_access) {
+    return [`Fund access: ${fundAccessSummary(c.fund_access) || "no funds"}`];
+  }
+  if (e.action === "update") {
+    return Object.entries(c).map(([k, v]) => {
+      const f = fields[k];
+      const label = f?.label ?? k;
+      if (v && typeof v === "object" && "to" in v) return `${label}: ${historyValue(f, v.from)} → ${historyValue(f, v.to)}`;
+      return `${label}: ${historyValue(f, v)}`;
+    });
+  }
+  if (e.action === "create" && e.entity !== "activities") { // a note's text is already in the subject
+    // Show what the record was created with (non-empty fields only).
+    return Object.entries(c)
+      .filter(([k, v]) => v != null && v !== "" && fields[k] && k !== "created_by")
+      .map(([k, v]) => `${fields[k].label}: ${historyValue(fields[k], v)}`);
+  }
+  return [];
+}
+
+const localTime = (at) => new Date(`${at.replace(" ", "T")}Z`)
+  .toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+
+/** Change history panel: this record's changes plus its related records', newest first. */
 async function history(el, entity, id) {
-  const items = await api("GET", `/api/audit?entity=${entity}&entity_id=${id}&limit=20`);
+  const PAGE = 25;
   const box = document.createElement("div");
-  box.innerHTML = `<div class="section-title">Change history</div>${items.map((e) => `
-    <div class="activity"><div class="when">${esc(e.at)} UTC · ${esc(e.user_name || "Former user")} ${esc(ACTION_LABEL[e.action] || e.action)}</div>
-      ${esc(describeChange(e))}</div>`).join("") || '<div class="muted">No recorded changes.</div>'}`;
+  box.innerHTML = `<div class="section-title">Change history
+      <label class="muted" style="font-weight:400;font-size:12px"><input type="checkbox" data-rel checked> Include related records</label></div>
+    <div data-list></div><button class="btn small" data-more hidden>Show older changes</button>`;
   el.append(box);
+  const list = $("[data-list]", box), more = $("[data-more]", box), rel = $("[data-rel]", box);
+  let last = null;
+  const load = async (reset) => {
+    if (reset) { list.innerHTML = ""; last = null; }
+    const items = await api("GET", `/api/audit?entity=${entity}&entity_id=${id}&limit=${PAGE}` +
+      `&related=${rel.checked}${last ? `&before=${last}` : ""}`);
+    list.insertAdjacentHTML("beforeend", items.map((e) => {
+      const own = e.entity === entity && e.entity_id === id;
+      const subject = own ? "" : ` ${ENTITY_NOUN[e.entity] ?? e.entity} · ${historySubject(e)}`;
+      const lines = historyLines(e);
+      return `<div class="activity"><div class="when">${esc(localTime(e.at))} · ${esc(e.user_name || "Former user")}
+          ${esc(ACTION_LABEL[e.action] || e.action)}${esc(subject)}</div>
+        ${lines.map((l) => `<div>${esc(l)}</div>`).join("")}</div>`;
+    }).join(""));
+    if (!list.children.length) list.innerHTML = '<div class="muted">No recorded changes.</div>';
+    if (items.length) last = items[items.length - 1].id;
+    more.hidden = items.length < PAGE;
+  };
+  rel.onchange = () => guard(() => load(true));
+  more.onclick = () => guard(() => load(false));
+  await load(true);
 }
 
 async function lpExtras(el, lp, after) {
@@ -813,6 +903,7 @@ async function showCapitalEvent(ev, after) {
     closeDrawer();
     after?.();
   });
+  await history(d, "capital_events", ev.id);
 }
 
 VIEWS["deal-board"] = {
@@ -1094,6 +1185,7 @@ function editFundAccess(u, after) {
     closeDrawer();
     after();
   });
+  history(d, "users", u.id);
 }
 
 function newUser(after) {

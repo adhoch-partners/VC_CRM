@@ -94,11 +94,39 @@ def check_rules(conn, entity, row):
             raise HTTPException(400, "The linked round belongs to a different company.")
 
 
-def audit(conn, user, action, entity, entity_id, changes=None):
-    conn.execute(
-        "INSERT INTO audit_log (user_id, action, entity, entity_id, changes) VALUES (?, ?, ?, ?, ?)",
-        (user["id"], action, entity, entity_id,
-         json.dumps(changes, default=str) if changes is not None else None))
+# For each record type, the parent records whose history should include its changes.
+PARENT_KEYS = {
+    "commitments": [("lps", "lp_id"), ("funds", "fund_id")],
+    "investments": [("companies", "company_id"), ("funds", "fund_id"), ("rounds", "round_id")],
+    "valuations": [("companies", "company_id"), ("funds", "fund_id")],
+    "realizations": [("companies", "company_id"), ("funds", "fund_id")],
+    "capital_events": [("funds", "fund_id")],
+    "rounds": [("companies", "company_id")],
+    "round_investors": [("rounds", "round_id"), ("investors", "investor_id")],
+}
+
+
+def related(entity, row):
+    if not row:
+        return set()
+    out = {(e, row.get(k)) for e, k in PARENT_KEYS.get(entity, []) if row.get(k) is not None}
+    if entity == "activities" and row.get("entity"):
+        out.add((row["entity"], row.get("entity_id")))
+    return out
+
+
+def audit(conn, user, action, entity, entity_id, changes=None, record=None, also=()):
+    """Log a change. `record` is a snapshot of the record (used to label the entry and to
+    decide who may see it later); `also` adds parents beyond those in the snapshot, e.g.
+    the old LP when a commitment moves."""
+    aid = conn.insert("audit_log", {
+        "user_id": user["id"], "action": action, "entity": entity, "entity_id": entity_id,
+        "changes": json.dumps(changes, default=str) if changes is not None else None,
+        "record": json.dumps(record, default=str) if record is not None else None,
+    })
+    links = (set(also) | related(entity, record)) - {(entity, entity_id)}
+    conn.executemany("INSERT INTO audit_links (audit_id, entity, entity_id) VALUES (?, ?, ?)",
+                     [(aid, e, i) for e, i in links if i is not None])
 
 
 def public_user(u):
@@ -344,27 +372,51 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
 
     @app.get("/api/audit")
     def audit_log(entity: str | None = None, entity_id: int | None = None, limit: int = 50,
+                  before: int | None = None, related: bool = True,
                   acc=Depends(get_access), conn=Depends(get_conn)):
+        """Newest first. For one record, also includes changes to its child records
+        (related=true), each shown only if the user may see that child. Page with
+        `before` = the id of the last entry received."""
         if not acc.admin:
             # Non-admins read history one record at a time, for records they can see.
             if entity not in ENTITIES and entity != "capital_events" or entity_id is None:
                 raise deny("Only admins can browse the full change log.")
             visible_row(conn, acc, entity, entity_id)
         where, args = [], []
-        if entity:
-            where.append("a.entity = ?")
-            args.append(entity)
-        if entity_id is not None:
-            where.append("a.entity_id = ?")
-            args.append(entity_id)
-        sql = ("SELECT a.*, u.name AS user_name FROM audit_log a "
-               "LEFT JOIN users u ON u.id = a.user_id")
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        rows = conn.execute(f"{sql} ORDER BY a.id DESC LIMIT ?",
-                            [*args, max(1, min(limit, 500))])
-        return [{**dict(r), "changes": json.loads(r["changes"]) if r["changes"] else None}
-                for r in rows]
+        if entity and entity_id is not None and related:
+            where.append("((a.entity = ? AND a.entity_id = ?) OR a.id IN "
+                         "(SELECT audit_id FROM audit_links WHERE entity = ? AND entity_id = ?))")
+            args += [entity, entity_id, entity, entity_id]
+        else:
+            if entity:
+                where.append("a.entity = ?")
+                args.append(entity)
+            if entity_id is not None:
+                where.append("a.entity_id = ?")
+                args.append(entity_id)
+        limit = max(1, min(limit, 500))
+        out, cursor = [], before
+        while len(out) < limit:
+            page_where = where + (["a.id < ?"] if cursor else [])
+            sql = ("SELECT a.*, u.name AS user_name FROM audit_log a "
+                   "LEFT JOIN users u ON u.id = a.user_id")
+            if page_where:
+                sql += " WHERE " + " AND ".join(page_where)
+            rows = conn.execute(f"{sql} ORDER BY a.id DESC LIMIT 200",
+                                [*args, *([cursor] if cursor else [])]).fetchall()
+            if not rows:
+                break
+            for r in rows:
+                e = {**dict(r), "changes": json.loads(r["changes"]) if r["changes"] else None,
+                     "record": json.loads(r["record"]) if r["record"] else None}
+                direct = e["entity"] == entity and e["entity_id"] == entity_id
+                if acc.admin or direct or (e["record"] and e["entity"] != "users"
+                                           and acc.can_view(e["entity"], e["record"])):
+                    out.append(e)
+                    if len(out) == limit:
+                        break
+            cursor = rows[-1]["id"]
+        return out
 
     # ------------------------------------------------------------ metadata
 
@@ -506,7 +558,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
             conn.executemany(
                 "INSERT INTO capital_event_allocations (event_id, commitment_id, amount) "
                 "VALUES (?, ?, ?)", [(eid, cid, amt) for cid, amt in split.items()])
-            audit(conn, acc.user, "create", "capital_events", eid, row)
+            audit(conn, acc.user, "create", "capital_events", eid, row, record={**row, "id": eid})
         return acc.annotate("capital_events", fetch(conn, "capital_events", eid))
 
     @app.get("/api/capital-events/{eid}/allocations")
@@ -528,8 +580,11 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         paid = 1 if data.get("paid") else 0
         with conn.transaction():
             conn.execute("UPDATE capital_event_allocations SET paid = ? WHERE id = ?", (paid, aid))
+            lp = conn.execute("SELECT l.name FROM commitments c JOIN lps l ON l.id = c.lp_id "
+                              "WHERE c.id = ?", (alloc["commitment_id"],)).fetchone()
             audit(conn, acc.user, "update", "capital_events", alloc["event_id"],
-                  {"allocation_id": aid, "paid": paid})
+                  {"paid": {"from": alloc["paid"], "to": paid}, "lp": lp["name"] if lp else None},
+                  record=ev)
         return fetch(conn, "capital_event_allocations", aid)
 
     @app.delete("/api/capital-events/{eid}", status_code=204)
@@ -538,7 +593,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         need_fund_edit(acc, old["fund_id"])
         with conn.transaction():
             conn.execute("DELETE FROM capital_events WHERE id = ?", (eid,))
-            audit(conn, acc.user, "delete", "capital_events", eid, old)
+            audit(conn, acc.user, "delete", "capital_events", eid, old, record=old)
 
     # ------------------------------------------------------------ generic CRUD
 
@@ -583,7 +638,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         try:
             with conn.transaction():
                 rid = conn.insert(entity, row)
-                audit(conn, acc.user, "create", entity, rid, row)
+                audit(conn, acc.user, "create", entity, rid, row, record={**row, "id": rid})
         except IntegrityError as e:
             raise _integrity(e)
         acc.reset()
@@ -614,7 +669,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
                         f"UPDATE {entity} SET {', '.join(f'{k} = ?' for k in changed)} "
                         f"WHERE id = ?", [*changed.values(), rid])
                     audit(conn, acc.user, "update", entity, rid,
-                          {k: {"from": old.get(k), "to": v} for k, v in changed.items()})
+                          {k: {"from": old.get(k), "to": v} for k, v in changed.items()},
+                          record={**old, **changed}, also=related(entity, old))
             except IntegrityError as e:
                 raise _integrity(e)
             acc.reset()
@@ -643,7 +699,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
                             "DELETE FROM activities WHERE entity = 'rounds' AND entity_id "
                             "IN (SELECT id FROM rounds WHERE company_id = ?)", (rid,))
                 conn.execute(f"DELETE FROM {entity} WHERE id = ?", (rid,))
-                audit(conn, acc.user, "delete", entity, rid, old)
+                audit(conn, acc.user, "delete", entity, rid, old, record=old)
         except IntegrityError as e:
             raise _integrity(e)
 

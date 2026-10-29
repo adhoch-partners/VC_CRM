@@ -222,8 +222,19 @@ Things to be aware of:
 | Users (admins only) | Grid | Invite users, set roles, reset passwords, deactivate. |
 | All companies | Grid | Every company regardless of stage. The drawer has tabs for investments, valuations and realizations. |
 
-Every LP, commitment, company and fund has an activity log (calls, meetings, emails, notes, with
-who logged each one) and a change history showing who changed which field, from what, to what.
+Every LP, commitment, company, fund, investor and round has an activity log (calls, meetings,
+emails, notes, with who logged each one).
+
+**Change history:** every create, edit and delete is recorded with who made it, when, and each
+field's old and new value. Open any record to see its history at the bottom, newest first, in
+your local time ("Target ask: $5M → $6M"). By default it also includes changes to related
+records: an LP shows its commitments' changes; a fund shows its commitments, capital calls and
+investments; a company shows its investments, marks, exits and rounds; a round shows its investor
+pipeline; a capital call shows who marked which LP as paid; an admin's user screen shows role,
+access and password resets. Untick "Include related records" to see only the record itself. Each
+related change is shown only to people allowed to see that record (a Fund II user opening a shared
+LP sees its Fund II changes only). Deleted records keep their history on their parent records.
+History cannot be edited or deleted from the app.
 Viewers see the same screens with editing turned off.
 
 ## Data model
