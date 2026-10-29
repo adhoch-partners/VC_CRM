@@ -1,12 +1,4 @@
 import pytest
-from fastapi.testclient import TestClient
-
-from vc_crm.app import create_app
-
-
-@pytest.fixture
-def client(tmp_path):
-    return TestClient(create_app(str(tmp_path / "test.db")))
 
 
 def post(client, path, body, status=201):
@@ -208,11 +200,11 @@ def test_connection_can_close_on_another_thread(tmp_path):
     # FastAPI may run a dependency's setup and teardown on different threads.
     import threading
 
-    from vc_crm.db import connect, init_db
+    from vc_crm.db import Database
 
-    path = str(tmp_path / "t.db")
-    init_db(path)
-    conn = connect(path)
+    db = Database(str(tmp_path / "t.db"))
+    db.init()
+    conn = db.connect()
     err = []
 
     def use():

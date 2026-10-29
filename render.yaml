@@ -1,0 +1,31 @@
+# Render Blueprint: one web service + one managed Postgres database.
+# In Render: New > Blueprint > pick this repo. You will be asked for ADMIN_EMAIL
+# and ADMIN_PASSWORD, which create the first admin on first start.
+services:
+  - type: web
+    name: vc-crm
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vc-crm-db
+          property: connectionString
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: SESSION_DAYS
+        value: "7"
+      - key: ADMIN_NAME
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+
+databases:
+  - name: vc-crm-db
+    plan: basic-256mb
+    databaseName: vc_crm
+    # Empty allow list = reachable only from your Render services, not the internet.
+    ipAllowList: []

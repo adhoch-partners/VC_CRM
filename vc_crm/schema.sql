@@ -1,5 +1,36 @@
 PRAGMA foreign_keys = ON;
 
+-- ---------------------------------------------------------------- Access
+
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY,
+    email         TEXT NOT NULL UNIQUE,
+    name          TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL CHECK (role IN ('admin', 'editor', 'viewer')),
+    active        INTEGER NOT NULL DEFAULT 1,
+    last_login_at TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Only a hash of the cookie token is stored, so a database leak cannot be replayed.
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id        INTEGER PRIMARY KEY,
+    user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    action    TEXT NOT NULL,
+    entity    TEXT NOT NULL,
+    entity_id INTEGER,
+    changes   TEXT,
+    at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ---------------------------------------------------------------- Fundraising
 
 CREATE TABLE IF NOT EXISTS funds (
@@ -142,6 +173,7 @@ CREATE TABLE IF NOT EXISTS activities (
     activity_date TEXT NOT NULL,
     kind          TEXT NOT NULL DEFAULT 'Note',
     summary       TEXT NOT NULL,
+    created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -152,3 +184,5 @@ CREATE INDEX IF NOT EXISTS idx_investments_company ON investments(company_id);
 CREATE INDEX IF NOT EXISTS idx_valuations_company ON valuations(company_id);
 CREATE INDEX IF NOT EXISTS idx_realizations_company ON realizations(company_id);
 CREATE INDEX IF NOT EXISTS idx_activities_entity ON activities(entity, entity_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id);

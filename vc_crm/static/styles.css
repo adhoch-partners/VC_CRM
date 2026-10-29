@@ -49,6 +49,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 14px 10px 4px; }
 #nav a { display: block; padding: 7px 10px; border-radius: 6px; cursor: pointer; color: var(--text); }
 #nav a:hover { background: var(--surface-2); }
+#nav [hidden] { display: none; }
 #nav a.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 main { flex: 1; min-width: 0; padding: 0 24px 40px; }
 .topbar { display: flex; align-items: center; gap: 12px; padding: 18px 0 14px; flex-wrap: wrap; }
@@ -147,12 +148,27 @@ table.grid { border-collapse: collapse; width: 100%; font-variant-numeric: tabul
   color: var(--muted); }
 .tabs button.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 
+#app { display: flex; min-height: 100vh; width: 100%; }
+#app[hidden], #login[hidden] { display: none; }
+.sidebar { display: flex; flex-direction: column; }
+#me { margin-top: auto; padding: 12px 10px 4px; border-top: 1px solid var(--border); font-size: 12px; }
+#me .who { font-weight: 600; font-size: 14px; }
+#login { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px; background: var(--bg); }
+.login-card { width: min(360px, 100%); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 12px; box-shadow: var(--shadow); }
+.login-card .brand { padding: 0 0 4px; }
+.login-card label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+input[type=password] { border: 1px solid var(--border); background: var(--surface); border-radius: 6px;
+  padding: 6px 8px; width: 100%; }
+[data-err]:empty { display: none; }
+
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text);
   color: var(--bg); padding: 10px 16px; border-radius: 8px; z-index: 20; max-width: 90vw; }
 #toast.err { background: var(--bad); color: #fff; }
 
 @media (max-width: 760px) {
   body { flex-direction: column; }
+  #app { flex-direction: column; }
   .sidebar { width: auto; height: auto; position: static; padding: 8px; }
   #nav { display: flex; flex-wrap: wrap; gap: 4px; }
   .nav-group { display: none; }

@@ -9,10 +9,14 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : {},
+    headers: { "X-CRM": "1", ...(body ? { "Content-Type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 204) return null;
+  if (res.status === 401 && path !== "/api/auth/login") {
+    showLogin();
+    throw new Error("Your session has ended. Please sign in again.");
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : res.statusText);
   return data;
@@ -47,7 +51,9 @@ const fmt = {
   num: (v) => (v == null || v === "" ? "" : Number(v).toLocaleString()),
 };
 
-const S = { meta: null, look: { funds: {}, lps: {}, companies: {} }, view: null, prefs: {} };
+const S = { meta: null, me: null, people: {}, look: { funds: {}, lps: {}, companies: {} }, view: null, prefs: {} };
+const canEdit = () => ["admin", "editor"].includes(S.me?.role);
+const isAdmin = () => S.me?.role === "admin";
 
 try { S.prefs = JSON.parse(localStorage.getItem("vccrm.prefs") || "{}"); } catch { S.prefs = {}; }
 function pref(key, value) {
@@ -57,8 +63,9 @@ function pref(key, value) {
 }
 
 async function loadLookups() {
-  const [funds, lps, companies] = await Promise.all(
-    ["funds", "lps", "companies"].map((e) => api("GET", `/api/${e}`)));
+  const [funds, lps, companies, people] = await Promise.all(
+    ["funds", "lps", "companies", "users/directory"].map((e) => api("GET", `/api/${e}`)));
+  S.people = Object.fromEntries(people.map((u) => [u.id, u.name]));
   S.look.funds = Object.fromEntries(funds.map((r) => [r.id, r]));
   S.look.lps = Object.fromEntries(lps.map((r) => [r.id, r]));
   S.look.companies = Object.fromEntries(companies.map((r) => [r.id, r]));
@@ -110,6 +117,11 @@ function fundFilter(onChange) {
   return sel;
 }
 
+/** A button only editors and admins see (a placeholder node for viewers). */
+function editButton(...args) {
+  return canEdit() ? button(...args) : document.createComment("read-only");
+}
+
 function button(label, onClick, cls = "") {
   const b = document.createElement("button");
   b.className = `btn ${cls}`;
@@ -147,7 +159,7 @@ function renderGrid(el, { entity, rows, cols, onOpen, onChanged, search = true }
       field: f,
       label: base.label ?? f?.label ?? base.name,
       num: base.num ?? (f ? isNum(f) : false),
-      editable: base.editable ?? Boolean(f && entity && !base.value),
+      editable: canEdit() && (base.editable ?? Boolean(f && entity && !base.value)),
     };
   });
 
@@ -255,7 +267,7 @@ function renderBoard(el, { entity, stageField, stages, rows, card, amount, onOpe
       $(".name .muted", col).textContent = items.length;
       $(".sum", col).textContent = fmt.money(items.reduce((t, r) => t + (amount(r) || 0), 0), false);
       $(".col-body", col).innerHTML = items.map((r) =>
-        `<div class="card" draggable="true" data-id="${r.id}">${card(r)}</div>`).join("");
+        `<div class="card" draggable="${canEdit()}" data-id="${r.id}">${card(r)}</div>`).join("");
     }
   };
 
@@ -273,6 +285,7 @@ function renderBoard(el, { entity, stageField, stages, rows, card, amount, onOpe
     col.addEventListener("dragleave", (e) => { if (!col.contains(e.relatedTarget)) col.classList.remove("drop"); });
     col.addEventListener("drop", async (e) => {
       e.preventDefault();
+      if (!canEdit()) return;
       col.classList.remove("drop");
       const row = rows.find((r) => r.id === dragId);
       const stage = col.dataset.stage;
@@ -333,20 +346,23 @@ function recordTitle(entity, r) {
 async function editRecord(entity, row, after, defaults = {}) {
   const fields = fieldsOf(entity);
   const isNew = !row?.id;
+  const ro = !canEdit();
   const values = isNew ? { ...Object.fromEntries(fields.filter((f) => f.default).map((f) => [f.name, f.default])), ...defaults } : row;
   const d = openDrawer(`
     <h2>${esc(recordTitle(entity, row))}</h2>
     <div class="muted">${esc(S.meta.entities[entity].label)}</div>
     ${formHtml(fields, values)}
     <div class="drawer-actions">
-      <div><button class="btn primary" data-save>${isNew ? "Create" : "Save"}</button>
+      <div>${ro ? "" : `<button class="btn primary" data-save>${isNew ? "Create" : "Save"}</button>`}
         <button class="btn" data-cancel>Close</button></div>
-      ${isNew ? "" : '<button class="btn danger" data-del>Delete</button>'}
+      ${isNew || ro ? "" : '<button class="btn danger" data-del>Delete</button>'}
     </div>
     <div data-extra></div>`);
   const form = $("form", d);
+  if (ro) form.querySelectorAll("input,select,textarea").forEach((x) => (x.disabled = true));
   $("[data-cancel]", d).onclick = closeDrawer;
-  $("[data-save]", d).onclick = () => guard(async () => {
+  const save = $("[data-save]", d);
+  if (save) save.onclick = () => guard(async () => {
     const body = formValues(form, fields, isNew ? null : row);
     if (isNew) await api("POST", `/api/${entity}`, body);
     else if (Object.keys(body).length) await api("PATCH", `/api/${entity}/${row.id}`, body);
@@ -369,6 +385,7 @@ async function editRecord(entity, row, after, defaults = {}) {
     if (entity === "companies") await companyExtras(extra, row, after);
     if (entity === "lps") await lpExtras(extra, row, after);
     if (ACTIVITY_OWNERS.includes(entity)) await activityLog(extra, entity, row.id);
+    await history(extra, entity, row.id);
   }
 }
 
@@ -378,15 +395,15 @@ async function activityLog(el, entity, id) {
   const draw = async () => {
     const items = await api("GET", `/api/activities?entity=${entity}&entity_id=${id}`);
     box.innerHTML = `<div class="section-title">Activity</div>
-      <form class="form" style="grid-template-columns: 130px 110px 1fr auto; align-items:end; margin-top:0">
+      <form class="form" ${canEdit() ? "" : "hidden"} style="grid-template-columns: 130px 110px 1fr auto; align-items:end; margin-top:0">
         <input type="date" name="activity_date" value="${today()}">
         <select name="kind">${S.meta.entities.activities.fields.find((f) => f.name === "kind").options
           .map((o) => `<option>${o}</option>`).join("")}</select>
         <input type="text" name="summary" placeholder="Log a call, meeting, note...">
         <button class="btn">Add</button>
       </form>
-      ${items.map((a) => `<div class="activity"><div class="when">${esc(a.activity_date)} · ${esc(a.kind)}
-        <span class="link" data-del-act="${a.id}" style="float:right">remove</span></div>${esc(a.summary)}</div>`).join("")
+      ${items.map((a) => `<div class="activity"><div class="when">${esc(a.activity_date)} · ${esc(a.kind)}${a.created_by ? ` · ${esc(S.people[a.created_by] || "Former user")}` : ""}
+        ${canEdit() ? `<span class="link" data-del-act="${a.id}" style="float:right">remove</span>` : ""}</div>${esc(a.summary)}</div>`).join("")
         || '<div class="muted">No activity logged.</div>'}`;
     const f = $("form", box);
     f.onsubmit = (e) => {
@@ -406,12 +423,32 @@ async function activityLog(el, entity, id) {
   await draw();
 }
 
+const ACTION_LABEL = { create: "created", update: "updated", delete: "deleted", password_change: "changed password" };
+
+function describeChange(e) {
+  if (e.action !== "update" || !e.changes) return "";
+  return Object.entries(e.changes).map(([k, v]) => {
+    if (v && typeof v === "object" && "to" in v) return `${k}: ${v.from ?? "(blank)"} → ${v.to ?? "(blank)"}`;
+    return `${k}: ${v}`;
+  }).join("; ");
+}
+
+async function history(el, entity, id) {
+  const items = await api("GET", `/api/audit?entity=${entity}&entity_id=${id}&limit=20`);
+  const box = document.createElement("div");
+  box.innerHTML = `<div class="section-title">Change history</div>${items.map((e) => `
+    <div class="activity"><div class="when">${esc(e.at)} UTC · ${esc(e.user_name || "Former user")} ${esc(ACTION_LABEL[e.action] || e.action)}</div>
+      ${esc(describeChange(e))}</div>`).join("") || '<div class="muted">No recorded changes.</div>'}`;
+  el.append(box);
+}
+
 async function lpExtras(el, lp, after) {
   const commits = await api("GET", `/api/commitments?lp_id=${lp.id}`);
   const box = document.createElement("div");
-  box.innerHTML = `<div class="section-title">Fund commitments <button class="btn small">+ Add to fund pipeline</button></div><div></div>`;
+  box.innerHTML = `<div class="section-title">Fund commitments ${canEdit() ? '<button class="btn small">+ Add to fund pipeline</button>' : ""}</div><div></div>`;
   el.append(box);
-  $("button", box).onclick = () => editRecord("commitments", null, after, { lp_id: lp.id });
+  const add = $("button", box);
+  if (add) add.onclick = () => editRecord("commitments", null, after, { lp_id: lp.id });
   renderGrid(box.lastElementChild, {
     entity: "commitments", rows: commits, search: false,
     cols: ["fund_id", "stage", "target_amount", "committed_amount"],
@@ -427,7 +464,7 @@ async function companyExtras(el, co, after) {
   const draw = async () => {
     const rows = await api("GET", `/api/${cur}?company_id=${co.id}`);
     box.innerHTML = `<div class="tabs">${tabs.map(([k, l]) => `<button data-t="${k}" class="${k === cur ? "on" : ""}">${l}</button>`).join("")}</div>
-      <div style="margin:10px 0"><button class="btn small" data-add>+ Add ${cur.replace(/s$/, "")}</button></div><div data-g></div>`;
+      <div style="margin:10px 0" ${canEdit() ? "" : "hidden"}><button class="btn small" data-add>+ Add ${cur.replace(/s$/, "")}</button></div><div data-g></div>`;
     box.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { cur = b.dataset.t; draw(); }));
     const defaults = { company_id: co.id, fund_id: co.fund_id ?? "" };
     defaults[{ investments: "investment_date", valuations: "valuation_date", realizations: "realization_date" }[cur]] = today();
@@ -514,7 +551,7 @@ VIEWS["lp-board"] = {
     actions.append(
       fundFilter(() => render()),
       segmented([["board", "Board"], ["grid", "Grid"]], mode, (m) => { pref("lpMode", m); render(); }),
-      button("+ Add LP to pipeline", () => editRecord("commitments", null, render, { fund_id: fund }), "primary"),
+      editButton("+ Add LP to pipeline", () => editRecord("commitments", null, render, { fund_id: fund }), "primary"),
     );
     if (!Object.keys(S.look.funds).length) {
       el.innerHTML = `<div class="panel empty">Create a fund first (Funds &amp; capital), then add LPs to its pipeline.</div>`;
@@ -551,7 +588,7 @@ VIEWS["lp-board"] = {
 VIEWS.lps = {
   title: "LPs",
   async render(el, actions) {
-    actions.append(button("+ New LP", () => editRecord("lps", null, render), "primary"));
+    actions.append(editButton("+ New LP", () => editRecord("lps", null, render), "primary"));
     const [rows, commits] = await Promise.all([api("GET", "/api/lps"), api("GET", "/api/commitments")]);
     const closed = {};
     for (const c of commits) if (c.stage === "Closed") closed[c.lp_id] = (closed[c.lp_id] || 0) + (c.committed_amount || 0);
@@ -571,8 +608,8 @@ VIEWS.funds = {
   title: "Funds & capital",
   async render(el, actions) {
     actions.append(
-      button("+ New fund", () => editRecord("funds", null, render)),
-      button("+ Capital call / distribution", () => newCapitalEvent(render), "primary"),
+      editButton("+ New fund", () => editRecord("funds", null, render)),
+      editButton("+ Capital call / distribution", () => newCapitalEvent(render), "primary"),
     );
     const fund = pref("fund") ?? "";
     const q = fund ? `?fund_id=${fund}` : "";
@@ -649,7 +686,7 @@ async function showCapitalEvent(ev, after) {
     <div class="muted">${esc(ev.event_date)}${ev.due_date ? ` · due ${esc(ev.due_date)}` : ""} · ${fmt.money(ev.total_amount, false)}${ev.purpose ? ` · ${esc(ev.purpose)}` : ""}</div>
     <div class="section-title">Allocation by LP</div><div data-a></div>
     <div class="drawer-actions" style="margin-top:16px"><button class="btn" data-cancel>Close</button>
-      <button class="btn danger" data-del>Delete event</button></div>`);
+      ${canEdit() ? '<button class="btn danger" data-del>Delete event</button>' : ""}</div>`);
   renderGrid($("[data-a]", d), {
     rows: allocs, search: false,
     cols: [
@@ -658,7 +695,7 @@ async function showCapitalEvent(ev, after) {
       { name: "amount", label: "Amount", num: true, value: (r) => fmt.money(r.amount, false),
         total: (l) => fmt.money(l.reduce((t, r) => t + r.amount, 0), false) },
       { name: "paid", label: isCall ? "Received" : "Paid out",
-        value: (r) => `<input type="checkbox" data-paid="${r.id}" ${r.paid ? "checked" : ""}>` },
+        value: (r) => `<input type="checkbox" data-paid="${r.id}" ${r.paid ? "checked" : ""} ${canEdit() ? "" : "disabled"}>` },
     ],
   });
   d.querySelectorAll("[data-paid]").forEach((cb) => (cb.onchange = () => guard(async () => {
@@ -666,7 +703,8 @@ async function showCapitalEvent(ev, after) {
     after?.();
   })));
   $("[data-cancel]", d).onclick = closeDrawer;
-  $("[data-del]", d).onclick = () => guard(async () => {
+  const del = $("[data-del]", d);
+  if (del) del.onclick = () => guard(async () => {
     if (!confirm("Delete this event and its LP allocations?")) return;
     await api("DELETE", `/api/capital-events/${ev.id}`);
     closeDrawer();
@@ -680,7 +718,7 @@ VIEWS["deal-board"] = {
     const mode = pref("dealMode") ?? "board";
     actions.append(
       segmented([["board", "Board"], ["grid", "Grid"]], mode, (m) => { pref("dealMode", m); render(); }),
-      button("+ New deal", () => editRecord("companies", null, render), "primary"),
+      editButton("+ New deal", () => editRecord("companies", null, render), "primary"),
     );
     const rows = await api("GET", "/api/companies");
     if (mode === "board") {
@@ -713,7 +751,7 @@ VIEWS["deal-board"] = {
 VIEWS.companies = {
   title: "All companies",
   async render(el, actions) {
-    actions.append(button("+ New company", () => editRecord("companies", null, render), "primary"));
+    actions.append(editButton("+ New company", () => editRecord("companies", null, render), "primary"));
     renderGrid(el, {
       entity: "companies", rows: await api("GET", "/api/companies"),
       cols: ["name", "deal_stage", "sector", "company_stage", "location", "founders", "website", "source", "deal_owner", "fund_id"],
@@ -758,6 +796,124 @@ VIEWS.portfolio = {
   },
 };
 
+VIEWS.users = {
+  title: "Users",
+  async render(el, actions) {
+    actions.append(button("+ Invite user", () => newUser(render), "primary"));
+    const users = await api("GET", "/api/users");
+    el.innerHTML = `<div class="muted" style="margin-bottom:10px">Admins manage users and edit everything.
+      Editors can create, edit and delete records. Viewers are read-only. Deactivated users are signed out immediately.</div><div data-g></div>`;
+    renderGrid($("[data-g]", el), {
+      rows: users,
+      cols: [
+        { name: "name", label: "Name", value: (r) => esc(r.name) },
+        { name: "email", label: "Email", value: (r) => esc(r.email) },
+        { name: "role", label: "Role", value: (r) => `<select data-role="${r.id}">${S.meta.roles.map((x) =>
+          `<option ${x === r.role ? "selected" : ""}>${x}</option>`).join("")}</select>` },
+        { name: "active", label: "Status", value: (r) => (r.active ? "Active" : '<span class="muted">Deactivated</span>') },
+        { name: "last_login_at", label: "Last sign-in (UTC)", value: (r) => esc(r.last_login_at || "Never") },
+        { name: "actions", label: "", value: (r) => `<span class="link" data-reset="${r.id}">Reset password</span> ·
+          <span class="link" data-toggle="${r.id}">${r.active ? "Deactivate" : "Reactivate"}</span>` },
+      ],
+    });
+    const patch = (id, body) => guard(async () => { await api("PATCH", `/api/users/${id}`, body); toast("Saved"); render(); })
+      .catch(() => render());
+    el.querySelectorAll("[data-role]").forEach((x) => (x.onchange = () => patch(x.dataset.role, { role: x.value })));
+    el.querySelectorAll("[data-toggle]").forEach((x) => (x.onclick = () => {
+      const u = users.find((r) => String(r.id) === x.dataset.toggle);
+      if (u.active && !confirm(`Deactivate ${u.name}? They will be signed out.`)) return;
+      patch(u.id, { active: !u.active });
+    }));
+    el.querySelectorAll("[data-reset]").forEach((x) => (x.onclick = () => {
+      const u = users.find((r) => String(r.id) === x.dataset.reset);
+      const pw = prompt(`New temporary password for ${u.name} (at least 10 characters). They will be signed out everywhere.`);
+      if (pw) patch(u.id, { password: pw });
+    }));
+  },
+};
+
+function newUser(after) {
+  const fields = [
+    { name: "name", label: "Name", type: "text", required: true },
+    { name: "email", label: "Email", type: "text", required: true },
+    { name: "role", label: "Role", type: "select", options: S.meta.roles, required: true },
+    { name: "password", label: "Temporary password (10+ characters)", type: "text", required: true },
+  ];
+  const d = openDrawer(`<h2>Invite user</h2>
+    <div class="muted">Share the temporary password privately; they can change it under their name in the sidebar.</div>
+    ${formHtml(fields, { role: "viewer" })}
+    <div class="drawer-actions"><div><button class="btn primary" data-save>Create user</button>
+      <button class="btn" data-cancel>Close</button></div></div>`);
+  $("[data-cancel]", d).onclick = closeDrawer;
+  $("[data-save]", d).onclick = () => guard(async () => {
+    await api("POST", "/api/users", formValues($("form", d), fields));
+    toast("User created");
+    closeDrawer();
+    after();
+  });
+}
+
+function changePassword() {
+  const d = openDrawer(`<h2>Change password</h2>
+    <form class="form" style="grid-template-columns:1fr">
+      <label>Current password<input type="password" name="current_password" autocomplete="current-password"></label>
+      <label>New password (10+ characters)<input type="password" name="new_password" autocomplete="new-password"></label>
+      <label>Repeat new password<input type="password" name="repeat" autocomplete="new-password"></label>
+    </form>
+    <div class="drawer-actions"><div><button class="btn primary" data-save>Change password</button>
+      <button class="btn" data-cancel>Close</button></div></div>
+    <div class="muted" style="margin-top:12px">Your other devices will be signed out.</div>`);
+  const f = $("form", d);
+  $("[data-cancel]", d).onclick = closeDrawer;
+  $("[data-save]", d).onclick = () => guard(async () => {
+    if (f.new_password.value !== f.repeat.value) throw new Error("New passwords do not match.");
+    await api("POST", "/api/auth/password", { current_password: f.current_password.value, new_password: f.new_password.value });
+    toast("Password changed");
+    closeDrawer();
+  });
+}
+
+// ------------------------------------------------------------------ session
+
+function showLogin() {
+  S.me = null;
+  closeDrawer();
+  $("#app").hidden = true;
+  const box = $("#login");
+  box.hidden = false;
+  const f = $("form", box);
+  $("[data-err]", box).textContent = "";
+  f.password.value = "";
+  (f.email.value ? f.password : f.email).focus();
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    $("[data-err]", box).textContent = "";
+    try {
+      S.me = await api("POST", "/api/auth/login", { email: f.email.value, password: f.password.value });
+      box.hidden = true;
+      await start();
+    } catch (err) {
+      $("[data-err]", box).textContent = err.message;
+    }
+  };
+}
+
+function renderMe() {
+  $("#me").innerHTML = `<div class="who">${esc(S.me.name)}</div><div class="muted">${esc(S.me.email)} · ${esc(S.me.role)}</div>
+    <div style="margin-top:6px"><span class="link" data-pw>Change password</span> · <span class="link" data-out>Sign out</span></div>`;
+  $("[data-pw]", $("#me")).onclick = changePassword;
+  $("[data-out]", $("#me")).onclick = async () => { await api("POST", "/api/auth/logout"); showLogin(); };
+  document.querySelectorAll("[data-admin]").forEach((x) => (x.hidden = !isAdmin()));
+}
+
+async function start() {
+  S.meta = await api("GET", "/api/meta");
+  await loadLookups();
+  renderMe();
+  $("#app").hidden = false;
+  go(location.hash.slice(1) || "dashboard");
+}
+
 // ------------------------------------------------------------------ router
 
 async function render() {
@@ -776,7 +932,7 @@ async function render() {
 }
 
 function go(name) {
-  S.view = VIEWS[name] ? name : "dashboard";
+  S.view = VIEWS[name] && (name !== "users" || isAdmin()) ? name : "dashboard";
   if (location.hash.slice(1) !== S.view) location.hash = S.view;
   render();
 }
@@ -785,7 +941,10 @@ $("#nav").onclick = (e) => { const a = e.target.closest("a[data-view]"); if (a) 
 window.addEventListener("hashchange", () => { if (location.hash.slice(1) !== S.view) go(location.hash.slice(1)); });
 
 (async () => {
-  S.meta = await api("GET", "/api/meta");
-  await loadLookups();
-  go(location.hash.slice(1) || "dashboard");
+  try {
+    S.me = await api("GET", "/api/auth/me");
+  } catch {
+    return; // showLogin() already ran on the 401
+  }
+  await start();
 })();

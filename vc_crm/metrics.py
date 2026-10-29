@@ -208,7 +208,7 @@ def lp_positions(conn, fund_id=None):
         LEFT JOIN capital_event_allocations a ON a.commitment_id = c.id
         LEFT JOIN capital_events e ON e.id = a.event_id
         WHERE c.stage = 'Closed' {where}
-        GROUP BY c.id
+        GROUP BY c.id, l.name, f.name
         ORDER BY f.name, l.name
         """,
         args,

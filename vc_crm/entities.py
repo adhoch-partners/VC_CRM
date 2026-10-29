@@ -40,7 +40,7 @@ ENTITIES = {
     "funds": {
         "label": "Funds",
         "title": "name",
-        "order": "vintage DESC, name",
+        "order": "vintage DESC NULLS LAST, name",
         "fields": [
             f("name", "Fund name", required=True),
             f("vintage", "Vintage", "integer"),
