@@ -36,15 +36,16 @@ async function guard(fn) {
 }
 
 const fmt = {
-  money(v, compact = true) {
+  /** $750K below a million, $5.25M from a million up (including billions: $1,200M). */
+  money(v) {
     if (v == null || v === "") return "";
     const n = Number(v);
-    if (!compact) return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+    if (n === 0) return "$0";
     const a = Math.abs(n);
-    if (a >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
-    if (a >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
-    if (a >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
-    return `$${n.toFixed(0)}`;
+    const sign = n < 0 ? "-" : "";
+    const num = (x, digits) => x.toLocaleString(undefined, { maximumFractionDigits: digits });
+    // Switch to M once the K figure would round to 1,000K (e.g. $999,999 shows as $1M).
+    return Math.round(a / 100) >= 10000 ? `${sign}$${num(a / 1e6, 2)}M` : `${sign}$${num(a / 1e3, 1)}K`;
   },
   pct: (v, digits = 1) => (v == null ? "n/a" : `${(v * 100).toFixed(digits)}%`),
   multiple: (v) => (v == null ? "n/a" : `${v.toFixed(2)}x`),
@@ -93,6 +94,15 @@ function display(field, v) {
 }
 const isNum = (f) => ["money", "number", "integer", "percent"].includes(f.type);
 
+// Money is typed in $000s (5250 = $5,250,000) but stored and sent in full dollars.
+const toThousands = (v) => (v == null || v === "" ? "" : +(Number(v) / 1000).toFixed(5));
+function fromThousands(text) {
+  const t = String(text ?? "").replace(/[$,\s]/g, "");
+  if (t === "") return "";
+  const n = Number(t);
+  return Number.isFinite(n) ? Math.round(n * 100000) / 100 : text; // let the server reject junk
+}
+
 function input(field, value) {
   const v = value ?? "";
   if (field.type === "select" || field.type === "ref") {
@@ -107,6 +117,9 @@ function input(field, value) {
       `<option value="${esc(k)}" ${String(k) === String(v) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
   }
   if (field.type === "longtext") return `<textarea name="${field.name}">${esc(v)}</textarea>`;
+  if (field.type === "money") {
+    return `<input type="number" step="any" name="${field.name}" value="${esc(toThousands(v))}" placeholder="$000s" title="Amount in $000s">`;
+  }
   const type = field.type === "date" ? "date" : isNum(field) ? "number" : "text";
   return `<input type="${type}" name="${field.name}" value="${esc(v)}" ${type === "number" ? 'step="any"' : ""}>`;
 }
@@ -238,7 +251,7 @@ function renderGrid(el, { entity, rows, cols, onOpen, onChanged, search = true }
     const commit = async (save) => {
       if (done) return;
       done = true;
-      const val = inp.value;
+      const val = c.field.type === "money" ? fromThousands(inp.value) : inp.value;
       if (save && String(val) !== String(row[c.name] ?? "")) {
         try {
           const updated = await api("PATCH", `/api/${entity}/${row.id}`, { [c.name]: val });
@@ -275,7 +288,7 @@ function renderBoard(el, { entity, stageField, stages, rows, card, amount, onOpe
       const items = rows.filter((r) => r[stageField] === s);
       const col = cols[s];
       $(".name .muted", col).textContent = items.length;
-      $(".sum", col).textContent = fmt.money(items.reduce((t, r) => t + (amount(r) || 0), 0), false);
+      $(".sum", col).textContent = fmt.money(items.reduce((t, r) => t + (amount(r) || 0), 0));
       $(".col-body", col).innerHTML = items.map((r) =>
         `<div class="card" draggable="${Boolean(r._can_edit)}" data-id="${r.id}">${card(r)}</div>`).join("");
     }
@@ -332,12 +345,13 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#dra
 
 function formHtml(fields, values = {}) {
   return `<form class="form">${fields.map((f) =>
-    `<label class="${f.type === "longtext" ? "wide" : ""}">${esc(f.label)}${f.required ? " *" : ""}${input(f, values[f.name])}</label>`).join("")}</form>`;
+    `<label class="${f.type === "longtext" ? "wide" : ""}">${esc(f.label)}${f.type === "money" ? " ($000s)" : ""}${f.required ? " *" : ""}${input(f, values[f.name])}</label>`).join("")}</form>`;
 }
 function formValues(form, fields, original = null) {
   const out = {};
   for (const f of fields) {
-    const v = form.elements[f.name].value;
+    const raw = form.elements[f.name].value;
+    const v = f.type === "money" ? fromThousands(raw) : raw;
     if (!original || String(v) !== String(original[f.name] ?? "")) out[f.name] = v;
   }
   return out;
@@ -600,8 +614,9 @@ VIEWS["lp-board"] = {
         onOpen: (r) => editRecord("commitments", r, render),
         onMove: (r, stage) => {
           if (stage !== "Closed" || r.committed_amount) return {};
-          const v = prompt(`Committed amount for ${refLabel("lps", r.lp_id)}?`, r.target_amount ?? "");
-          return v === null ? false : { committed_amount: v, close_date: r.close_date ?? today() };
+          const v = prompt(`Committed amount for ${refLabel("lps", r.lp_id)}, in $000s (5250 = $5.25M)?`,
+            toThousands(r.target_amount));
+          return v === null ? false : { committed_amount: fromThousands(v), close_date: r.close_date ?? today() };
         },
         card: (r) => `<div class="title">${esc(refLabel("lps", r.lp_id))}</div>
           <div class="meta">${esc(refLabel("funds", r.fund_id))}${r.owner ? ` · ${esc(r.owner)}` : ""}</div>
@@ -688,7 +703,7 @@ VIEWS.funds = {
         { name: "event_date", label: "Date", value: (r) => esc(r.event_date) },
         { name: "fund", label: "Fund", value: (r) => esc(r.fund) },
         { name: "event_type", label: "Type", value: (r) => `<span class="pill">${esc(r.event_type)}</span>` },
-        { name: "total_amount", label: "Amount", num: true, value: (r) => fmt.money(r.total_amount, false) },
+        { name: "total_amount", label: "Amount", num: true, value: (r) => fmt.money(r.total_amount) },
         { name: "due_date", label: "Due", value: (r) => esc(r.due_date) },
         { name: "purpose", label: "Purpose", value: (r) => esc(r.purpose) },
         { name: "paid", label: "LPs paid", value: (r) => `${r.paid_count} / ${r.lp_count}` },
@@ -718,7 +733,7 @@ async function showCapitalEvent(ev, after) {
   const allocs = await api("GET", `/api/capital-events/${ev.id}/allocations`);
   const isCall = ev.event_type === "Capital call";
   const d = openDrawer(`<h2>${esc(ev.event_type)} · ${esc(ev.fund ?? refLabel("funds", ev.fund_id))}</h2>
-    <div class="muted">${esc(ev.event_date)}${ev.due_date ? ` · due ${esc(ev.due_date)}` : ""} · ${fmt.money(ev.total_amount, false)}${ev.purpose ? ` · ${esc(ev.purpose)}` : ""}</div>
+    <div class="muted">${esc(ev.event_date)}${ev.due_date ? ` · due ${esc(ev.due_date)}` : ""} · ${fmt.money(ev.total_amount)}${ev.purpose ? ` · ${esc(ev.purpose)}` : ""}</div>
     <div class="section-title">Allocation by LP</div><div data-a></div>
     <div class="drawer-actions" style="margin-top:16px"><button class="btn" data-cancel>Close</button>
       ${ev._can_edit ? '<button class="btn danger" data-del>Delete event</button>' : ""}</div>`);
@@ -727,8 +742,8 @@ async function showCapitalEvent(ev, after) {
     cols: [
       { name: "lp", label: "LP", value: (r) => esc(r.lp) },
       { name: "committed", label: "Committed", num: true, value: (r) => fmt.money(r.committed) },
-      { name: "amount", label: "Amount", num: true, value: (r) => fmt.money(r.amount, false),
-        total: (l) => fmt.money(l.reduce((t, r) => t + r.amount, 0), false) },
+      { name: "amount", label: "Amount", num: true, value: (r) => fmt.money(r.amount),
+        total: (l) => fmt.money(l.reduce((t, r) => t + r.amount, 0)) },
       { name: "paid", label: isCall ? "Received" : "Paid out",
         value: (r) => `<input type="checkbox" data-paid="${r.id}" ${r.paid ? "checked" : ""} ${ev._can_edit ? "" : "disabled"}>` },
     ],

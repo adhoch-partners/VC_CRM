@@ -231,6 +231,11 @@ users ──< sessions          audit_log (who, what, when, field-level changes)
 
 ## How the numbers are calculated
 
+**Amounts in the app are in $000s.** Type `5250` for $5,250,000 (decimals work: `12.5` is
+$12,500); money fields are labeled "($000s)". Amounts display as K below a million (`$750K`) and
+M from a million up (`$5.25M`, `$1,200M`). The database and the API keep full dollars to the cent,
+so totals, pro-rata splits and returns are unaffected. Price per share is entered in plain dollars.
+
 - **Committed** = sum of `committed_amount` on commitments in the **Closed** stage.
 - **Soft circled** = sum of `target_amount` in **Soft circle** and **Legal / docs**.
 - **Capital calls and distributions** are split across the fund's closed commitments
