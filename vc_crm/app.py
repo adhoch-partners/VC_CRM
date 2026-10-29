@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, metrics
+from .access import LEVELS, Access, deny
 from .db import Database, IntegrityError
 from .entities import CAPITAL_EVENT_FIELDS, DEAL_STAGES, ENTITIES, LP_STAGES
 
@@ -136,7 +137,10 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
             return user
         return dep
 
-    viewer, editor, admin = role("viewer"), role("editor"), role("admin")
+    viewer, admin = role("viewer"), role("admin")
+
+    def get_access(user=Depends(viewer), conn=Depends(get_conn)):
+        return Access(conn, user)
 
     def entity_meta(entity):
         if entity not in ENTITIES:
@@ -178,7 +182,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         token = auth.create_session(conn, row["id"], session_days)
         response.set_cookie(auth.COOKIE, token, max_age=session_days * 86400, httponly=True,
                             secure=cookie_secure, samesite="lax", path="/")
-        return public_user(row)
+        return {**public_user(row), **Access(conn, row).summary()}
 
     @app.post("/api/auth/logout", status_code=204)
     def logout(request: Request, response: Response, conn=Depends(get_conn)):
@@ -189,8 +193,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         response.delete_cookie(auth.COOKIE, path="/")
 
     @app.get("/api/auth/me")
-    def me(user=Depends(viewer)):
-        return public_user(user)
+    def me(acc=Depends(get_access)):
+        return {**public_user(acc.user), **acc.summary()}
 
     @app.post("/api/auth/password", status_code=204)
     def change_password(request: Request, data: dict = Body(...), user=Depends(viewer),
@@ -219,7 +223,10 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
 
     @app.get("/api/users")
     def list_users(user=Depends(admin), conn=Depends(get_conn)):
-        return [dict(r) for r in conn.execute(
+        grants = {}
+        for r in conn.execute("SELECT user_id, fund_id, level FROM fund_access"):
+            grants.setdefault(r["user_id"], {})[str(r["fund_id"])] = r["level"]
+        return [{**dict(r), "fund_access": grants.get(r["id"], {})} for r in conn.execute(
             "SELECT id, email, name, role, active, last_login_at, created_at FROM users "
             "ORDER BY name")]
 
@@ -287,9 +294,47 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
                 audit(conn, user, "update", "users", uid, logged)
         return {k: v for k, v in fetch(conn, "users", uid).items() if k != "password_hash"}
 
+    @app.get("/api/users/{uid}/funds")
+    def get_fund_access(uid: int, user=Depends(admin), conn=Depends(get_conn)):
+        fetch(conn, "users", uid)
+        return {str(r["fund_id"]): r["level"] for r in conn.execute(
+            "SELECT fund_id, level FROM fund_access WHERE user_id = ?", (uid,))}
+
+    @app.put("/api/users/{uid}/funds")
+    def set_fund_access(uid: int, data: dict = Body(...), user=Depends(admin),
+                        conn=Depends(get_conn)):
+        """Replace a user's fund access with {fund_id: "viewer" | "editor"}; omit for none."""
+        fetch(conn, "users", uid)
+        grants = {}
+        for fid, level in data.items():
+            if level in (None, "", "none"):
+                continue
+            if level not in LEVELS:
+                raise HTTPException(400, f"Level must be one of: {', '.join(LEVELS)}")
+            try:
+                grants[int(fid)] = level
+            except ValueError:
+                raise HTTPException(400, f"Invalid fund id {fid!r}")
+        try:
+            with conn.transaction():
+                conn.execute("DELETE FROM fund_access WHERE user_id = ?", (uid,))
+                conn.executemany(
+                    "INSERT INTO fund_access (user_id, fund_id, level) VALUES (?, ?, ?)",
+                    [(uid, fid, lvl) for fid, lvl in grants.items()])
+                audit(conn, user, "update", "users", uid,
+                      {"fund_access": {str(k): v for k, v in grants.items()}})
+        except IntegrityError:
+            raise HTTPException(400, "Unknown fund")
+        return get_fund_access(uid, user, conn)
+
     @app.get("/api/audit")
     def audit_log(entity: str | None = None, entity_id: int | None = None, limit: int = 50,
-                  user=Depends(viewer), conn=Depends(get_conn)):
+                  acc=Depends(get_access), conn=Depends(get_conn)):
+        if not acc.admin:
+            # Non-admins read history one record at a time, for records they can see.
+            if entity not in ENTITIES and entity != "capital_events" or entity_id is None:
+                raise deny("Only admins can browse the full change log.")
+            visible_row(conn, acc, entity, entity_id)
         where, args = [], []
         if entity:
             where.append("a.entity = ?")
@@ -316,34 +361,52 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
             "lp_stages": LP_STAGES,
             "deal_stages": DEAL_STAGES,
             "roles": auth.ROLES,
+            "fund_levels": LEVELS,
         }
 
     # ------------------------------------------------------------ analytics
+    # Every figure is computed only over funds the user can see.
 
-    def all_funds(conn):
-        return conn.execute("SELECT * FROM funds ORDER BY vintage DESC NULLS LAST, name").fetchall()
+    def visible_funds(conn, acc):
+        rows = conn.execute("SELECT * FROM funds ORDER BY vintage DESC NULLS LAST, name").fetchall()
+        return [f for f in rows if acc.can_view_fund(f["id"])]
+
+    def check_fund_filter(acc, fund_id):
+        if fund_id is not None and not acc.can_view_fund(fund_id):
+            raise HTTPException(404, "Fund not found")
+
+    def visible_holdings(conn, acc, fund_id=None):
+        return [h for h in metrics.holdings(conn, fund_id) if acc.can_view_fund(h["fund_id"])]
 
     @app.get("/api/dashboard")
-    def dashboard(user=Depends(viewer), conn=Depends(get_conn)):
-        funds = [metrics.fund_summary(conn, f) for f in all_funds(conn)]
-        rows = metrics.holdings(conn)
-        deals = {r["deal_stage"]: r["n"] for r in conn.execute(
-            "SELECT deal_stage, COUNT(*) AS n FROM companies GROUP BY deal_stage")}
+    def dashboard(acc=Depends(get_access), conn=Depends(get_conn)):
+        funds = [metrics.fund_summary(conn, f) for f in visible_funds(conn, acc)]
+        rows = visible_holdings(conn, acc)
+        companies = [dict(c) for c in conn.execute("SELECT * FROM companies")]
+        companies = [c for c in companies if acc.can_view("companies", c)]
+        deals = {}
+        for c in companies:
+            deals[c["deal_stage"]] = deals.get(c["deal_stage"], 0) + 1
         horizon = (date.today() + timedelta(days=14)).isoformat()
+        visible_co = {c["id"] for c in companies}
         tasks = [dict(r) for r in conn.execute(
             """
-            SELECT 'commitments' AS entity, c.id, l.name || ' / ' || f.name AS title,
+            SELECT 'commitments' AS entity, c.id, c.fund_id, l.name || ' / ' || f.name AS title,
                    c.next_step, c.next_step_date, c.owner, c.stage
             FROM commitments c JOIN lps l ON l.id = c.lp_id JOIN funds f ON f.id = c.fund_id
             WHERE c.next_step_date IS NOT NULL AND c.next_step_date <= ?
               AND c.stage NOT IN ('Closed', 'Declined')
             UNION ALL
-            SELECT 'companies', id, name, next_step, next_step_date, deal_owner, deal_stage
+            SELECT 'companies', id, fund_id, name, next_step, next_step_date, deal_owner, deal_stage
             FROM companies
             WHERE next_step_date IS NOT NULL AND next_step_date <= ?
               AND deal_stage NOT IN ('Invested', 'Passed')
             ORDER BY next_step_date
             """, (horizon, horizon))]
+        tasks = [t for t in tasks if (acc.can_view_fund(t["fund_id"]) if t["entity"] == "commitments"
+                                      else t["id"] in visible_co)]
+        for t in tasks:
+            t.pop("fund_id")
         return {
             "funds": funds,
             "portfolio": metrics.portfolio_totals(rows),
@@ -353,27 +416,42 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         }
 
     @app.get("/api/portfolio")
-    def portfolio(fund_id: int | None = None, user=Depends(viewer), conn=Depends(get_conn)):
-        rows = metrics.holdings(conn, fund_id)
+    def portfolio(fund_id: int | None = None, acc=Depends(get_access), conn=Depends(get_conn)):
+        check_fund_filter(acc, fund_id)
+        rows = visible_holdings(conn, acc, fund_id)
         totals = metrics.portfolio_totals(rows)
         for r in rows:
             r.pop("_flows")
         return {"holdings": rows, "totals": totals}
 
     @app.get("/api/funds/summary")
-    def funds_summary(user=Depends(viewer), conn=Depends(get_conn)):
-        return [metrics.fund_summary(conn, f) for f in all_funds(conn)]
+    def funds_summary(acc=Depends(get_access), conn=Depends(get_conn)):
+        return [acc.annotate("funds", metrics.fund_summary(conn, f))
+                for f in visible_funds(conn, acc)]
 
     @app.get("/api/lp-positions")
-    def lp_positions(fund_id: int | None = None, user=Depends(viewer), conn=Depends(get_conn)):
-        return metrics.lp_positions(conn, fund_id)
+    def lp_positions(fund_id: int | None = None, acc=Depends(get_access),
+                     conn=Depends(get_conn)):
+        check_fund_filter(acc, fund_id)
+        return [p for p in metrics.lp_positions(conn, fund_id) if acc.can_view_fund(p["fund_id"])]
 
     # ------------------------------------------------------------ capital events
 
+    def visible_event(conn, acc, eid):
+        ev = fetch(conn, "capital_events", eid)
+        if not acc.can_view_fund(ev["fund_id"]):
+            raise HTTPException(404, "Not found")
+        return ev
+
+    def need_fund_edit(acc, fund_id):
+        if not acc.can_edit_fund(fund_id):
+            raise deny("You need editor access to this fund.")
+
     @app.get("/api/capital-events")
-    def list_events(fund_id: int | None = None, user=Depends(viewer), conn=Depends(get_conn)):
+    def list_events(fund_id: int | None = None, acc=Depends(get_access), conn=Depends(get_conn)):
+        check_fund_filter(acc, fund_id)
         where, args = ("WHERE e.fund_id = ?", [fund_id]) if fund_id else ("", [])
-        return [dict(r) for r in conn.execute(
+        rows = [dict(r) for r in conn.execute(
             f"""SELECT e.*, f.name AS fund,
                        (SELECT COUNT(*) FROM capital_event_allocations a
                         WHERE a.event_id = e.id) AS lp_count,
@@ -381,10 +459,13 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
                         WHERE a.event_id = e.id AND a.paid = 1) AS paid_count
                 FROM capital_events e JOIN funds f ON f.id = e.fund_id {where}
                 ORDER BY e.event_date DESC, e.id DESC""", args)]
+        return [acc.annotate("capital_events", r) for r in rows
+                if acc.can_view_fund(r["fund_id"])]
 
     @app.post("/api/capital-events", status_code=201)
-    def create_event(data: dict = Body(...), user=Depends(editor), conn=Depends(get_conn)):
+    def create_event(data: dict = Body(...), acc=Depends(get_access), conn=Depends(get_conn)):
         row = coerce(CAPITAL_EVENT_FIELDS, data, partial=False)
+        need_fund_edit(acc, row["fund_id"])
         if row["total_amount"] <= 0:
             raise HTTPException(400, "Total amount must be positive")
         with conn.transaction():
@@ -410,12 +491,12 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
             conn.executemany(
                 "INSERT INTO capital_event_allocations (event_id, commitment_id, amount) "
                 "VALUES (?, ?, ?)", [(eid, cid, amt) for cid, amt in split.items()])
-            audit(conn, user, "create", "capital_events", eid, row)
-        return fetch(conn, "capital_events", eid)
+            audit(conn, acc.user, "create", "capital_events", eid, row)
+        return acc.annotate("capital_events", fetch(conn, "capital_events", eid))
 
     @app.get("/api/capital-events/{eid}/allocations")
-    def event_allocations(eid: int, user=Depends(viewer), conn=Depends(get_conn)):
-        fetch(conn, "capital_events", eid)
+    def event_allocations(eid: int, acc=Depends(get_access), conn=Depends(get_conn)):
+        visible_event(conn, acc, eid)
         return [dict(r) for r in conn.execute(
             """SELECT a.*, l.name AS lp, c.committed_amount AS committed
                FROM capital_event_allocations a
@@ -424,79 +505,112 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
                WHERE a.event_id = ? ORDER BY l.name""", (eid,))]
 
     @app.patch("/api/allocations/{aid}")
-    def mark_paid(aid: int, data: dict = Body(...), user=Depends(editor),
+    def mark_paid(aid: int, data: dict = Body(...), acc=Depends(get_access),
                   conn=Depends(get_conn)):
         alloc = fetch(conn, "capital_event_allocations", aid)
+        ev = visible_event(conn, acc, alloc["event_id"])
+        need_fund_edit(acc, ev["fund_id"])
         paid = 1 if data.get("paid") else 0
         with conn.transaction():
             conn.execute("UPDATE capital_event_allocations SET paid = ? WHERE id = ?", (paid, aid))
-            audit(conn, user, "update", "capital_events", alloc["event_id"],
+            audit(conn, acc.user, "update", "capital_events", alloc["event_id"],
                   {"allocation_id": aid, "paid": paid})
         return fetch(conn, "capital_event_allocations", aid)
 
     @app.delete("/api/capital-events/{eid}", status_code=204)
-    def delete_event(eid: int, user=Depends(editor), conn=Depends(get_conn)):
-        old = fetch(conn, "capital_events", eid)
+    def delete_event(eid: int, acc=Depends(get_access), conn=Depends(get_conn)):
+        old = visible_event(conn, acc, eid)
+        need_fund_edit(acc, old["fund_id"])
         with conn.transaction():
             conn.execute("DELETE FROM capital_events WHERE id = ?", (eid,))
-            audit(conn, user, "delete", "capital_events", eid, old)
+            audit(conn, acc.user, "delete", "capital_events", eid, old)
 
     # ------------------------------------------------------------ generic CRUD
 
+    def visible_row(conn, acc, entity, rid):
+        row = fetch(conn, entity, rid)
+        if not acc.can_view(entity, row):
+            raise HTTPException(404, "Not found")  # do not reveal that it exists
+        return row
+
     @app.get("/api/{entity}")
-    def list_rows(entity: str, request: Request, user=Depends(viewer), conn=Depends(get_conn)):
+    def list_rows(entity: str, request: Request, acc=Depends(get_access),
+                  conn=Depends(get_conn)):
         m = entity_meta(entity)
         names = {fl["name"] for fl in m["fields"]}
         filters = {k: v for k, v in request.query_params.items() if k in names}
         where = " AND ".join(f"{k} = ?" for k in filters)
         sql = f"SELECT * FROM {entity}" + (f" WHERE {where}" if where else "")
         try:
-            return [dict(r) for r in conn.execute(f"{sql} ORDER BY {m['order']}",
+            rows = [dict(r) for r in conn.execute(f"{sql} ORDER BY {m['order']}",
                                                   list(filters.values()))]
         except IntegrityError:
             raise HTTPException(400, "Invalid filter value")
+        return [acc.annotate(entity, r) for r in rows if acc.can_view(entity, r)]
 
     @app.get("/api/{entity}/{rid}")
-    def get_row(entity: str, rid: int, user=Depends(viewer), conn=Depends(get_conn)):
+    def get_row(entity: str, rid: int, acc=Depends(get_access), conn=Depends(get_conn)):
         entity_meta(entity)
-        return fetch(conn, entity, rid)
+        return acc.annotate(entity, visible_row(conn, acc, entity, rid))
 
     @app.post("/api/{entity}", status_code=201)
-    def create_row(entity: str, data: dict = Body(...), user=Depends(editor),
+    def create_row(entity: str, data: dict = Body(...), acc=Depends(get_access),
                    conn=Depends(get_conn)):
         row = coerce(entity_meta(entity)["fields"], data, partial=False)
         if entity == "activities":
-            row["created_by"] = user["id"]
+            if not acc.parent(row):
+                raise HTTPException(400, "The record this activity belongs to does not exist")
+            row["created_by"] = acc.user["id"]
+        if not acc.can_create(entity, row):
+            raise deny("Only admins can create funds." if entity == "funds" else
+                       "You need editor access to this fund (or record) to add that.")
         try:
             with conn.transaction():
                 rid = conn.insert(entity, row)
-                audit(conn, user, "create", entity, rid, row)
+                audit(conn, acc.user, "create", entity, rid, row)
         except IntegrityError as e:
             raise _integrity(e)
-        return fetch(conn, entity, rid)
+        acc.reset()
+        return acc.annotate(entity, fetch(conn, entity, rid))
 
     @app.patch("/api/{entity}/{rid}")
-    def update_row(entity: str, rid: int, data: dict = Body(...), user=Depends(editor),
+    def update_row(entity: str, rid: int, data: dict = Body(...), acc=Depends(get_access),
                    conn=Depends(get_conn)):
         row = coerce(entity_meta(entity)["fields"], data, partial=True)
-        old = fetch(conn, entity, rid)
+        old = visible_row(conn, acc, entity, rid)
+        if not acc.can_edit(entity, old):
+            raise deny("You have view-only access to this record.")
         changed = {k: v for k, v in row.items() if old.get(k) != v}
+        moves = {"fund_id", "entity", "entity_id"} & set(changed)
+        if moves:
+            # Moving a record to another fund (or parent) needs edit rights on both ends.
+            if not acc.can_create(entity, {**old, **changed}):
+                raise deny("You need editor access to the fund (or record) you are moving this to.")
+            if entity == "companies" and old["fund_id"] is not None \
+                    and not acc.can_edit_fund(old["fund_id"]):
+                raise deny("You need editor access to this company's current fund to change it.")
         if changed:
             try:
                 with conn.transaction():
                     conn.execute(
                         f"UPDATE {entity} SET {', '.join(f'{k} = ?' for k in changed)} "
                         f"WHERE id = ?", [*changed.values(), rid])
-                    audit(conn, user, "update", entity, rid,
+                    audit(conn, acc.user, "update", entity, rid,
                           {k: {"from": old.get(k), "to": v} for k, v in changed.items()})
             except IntegrityError as e:
                 raise _integrity(e)
-        return fetch(conn, entity, rid)
+            acc.reset()
+        return acc.annotate(entity, fetch(conn, entity, rid))
 
     @app.delete("/api/{entity}/{rid}", status_code=204)
-    def delete_row(entity: str, rid: int, user=Depends(editor), conn=Depends(get_conn)):
+    def delete_row(entity: str, rid: int, acc=Depends(get_access), conn=Depends(get_conn)):
         entity_meta(entity)
-        old = fetch(conn, entity, rid)
+        old = visible_row(conn, acc, entity, rid)
+        if not acc.can_delete(entity, old):
+            raise deny("Only admins can delete funds." if entity == "funds" else
+                       "Deleting this also deletes data in funds you cannot edit."
+                       if entity in ("lps", "companies") and acc.can_edit(entity, old) else
+                       "You have view-only access to this record.")
         try:
             with conn.transaction():
                 if entity in ACTIVITY_OWNERS:
@@ -507,7 +621,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
                             "DELETE FROM activities WHERE entity = 'commitments' AND entity_id "
                             "IN (SELECT id FROM commitments WHERE lp_id = ?)", (rid,))
                 conn.execute(f"DELETE FROM {entity} WHERE id = ?", (rid,))
-                audit(conn, user, "delete", entity, rid, old)
+                audit(conn, acc.user, "delete", entity, rid, old)
         except IntegrityError as e:
             raise _integrity(e)
 

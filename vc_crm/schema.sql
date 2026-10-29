@@ -60,6 +60,14 @@ CREATE TABLE IF NOT EXISTS lps (
     created_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Per-fund permissions for non-admin users. No row = no access to that fund.
+CREATE TABLE IF NOT EXISTS fund_access (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    fund_id INTEGER NOT NULL REFERENCES funds(id) ON DELETE CASCADE,
+    level   TEXT NOT NULL CHECK (level IN ('viewer', 'editor')),
+    PRIMARY KEY (user_id, fund_id)
+);
+
 -- One row per LP per fund: this is the card on the fundraising board.
 CREATE TABLE IF NOT EXISTS commitments (
     id               INTEGER PRIMARY KEY,

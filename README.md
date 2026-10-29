@@ -8,9 +8,9 @@ A CRM for venture capital partners covering both sides of the business:
 The UI is modeled on HubSpot's Kanban board view (drag cards between stages) and
 Airtable's grid view (click any cell to edit it inline, sort by column, search).
 
-It is a multi-user web app: people sign in with email and password, and each user is an
-**admin** (manages users, edits everything), **editor** (creates, edits, deletes records) or
-**viewer** (read-only). Every change is recorded with who made it.
+It is a multi-user web app: people sign in with email and password. **Admins** see and edit
+everything and manage users. Everyone else sees only the funds an admin grants them, as
+**Viewer** (read-only) or **Editor** on each fund. Every change is recorded with who made it.
 
 ## Deploy to Render (hosted, multi-user)
 
@@ -75,9 +75,42 @@ pytest
 | `SESSION_DAYS` | `7` | How long a sign-in lasts. |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME` | unset | Create the first admin, only when no users exist. |
 
+## Permissions
+
+| Who | Funds | Fund data (commitments, capital calls, investments, marks, exits) | Shared records (LPs, companies) |
+|---|---|---|---|
+| Admin | All; only admins create or delete funds | Full access | Full access |
+| Editor on a fund | Sees it, edits its details | Create, edit, delete in that fund | Edit any LP/company linked to that fund |
+| Viewer on a fund | Sees it | Read-only | Read-only (unless general role is editor) |
+| No access | Hidden | Hidden, and excluded from every total | Hidden if linked only to hidden funds |
+
+- **Linked funds:** an LP is linked to the funds it has commitments in; a company to its target
+  fund and any fund with an investment, mark or exit in it. Someone with access to only Fund II
+  sees a shared LP with only its Fund II commitment, and never Fund I amounts.
+- **Unlinked records** (an LP with no commitments yet, a deal not yet assigned to a fund) are
+  visible to everyone, so the team can work the top of both pipelines.
+- **General role** (editor / viewer) only governs shared records: an editor can change contact
+  details on any LP or company they can see, and create new LPs and unassigned deals. Anyone who
+  is an editor on at least one fund can also create those.
+- **Deleting** an LP or company also deletes its commitments or positions, so it requires editor
+  access on every fund it is linked to.
+- **New funds** are visible only to admins until an admin grants access (Admin > Users > Fund
+  access). New users start with no fund access.
+- Changes to someone's access apply on their next click.
+
+Things to be aware of:
+
+- Notes and activity on an LP or company record are seen by everyone who can see that record.
+  Put fund-specific notes on the LP's commitment (or the company's investment) instead.
+- Someone who cannot see an LP linked only to another fund may create a duplicate LP when adding
+  it to their fund. Admins see both and can merge them by moving the commitment.
+- Company names and LP names are visible to anyone with access to any fund they are linked to;
+  hiding a name from people who share a fund with it is not supported.
+
 ## Managing users
 
-- **In the app (admins):** Admin > Users to invite, change role, reset a password, or deactivate.
+- **In the app (admins):** Admin > Users to invite, change general role, set fund access, reset a
+  password, or deactivate.
   Deactivating or resetting a password signs that person out everywhere immediately. Users are
   deactivated rather than deleted so the change history keeps their name. The app will not let
   you remove the last active admin.
@@ -105,8 +138,8 @@ pytest
 - Security headers: Content-Security-Policy, X-Frame-Options DENY, nosniff, HSTS (production),
   and `Cache-Control: no-store` on all data responses. The interactive API docs are disabled.
 - The Postgres database in the Blueprint accepts connections only from your Render services.
-- Not included: two-factor authentication, single sign-on, password-reset emails, or per-fund
-  permissions (every signed-in user can see all funds and deals). Ask if you need these.
+- Not included: two-factor authentication, single sign-on, or password-reset emails.
+  Ask if you need these.
 
 ## Screens
 
@@ -164,6 +197,8 @@ needs a signed-in session cookie, and writes need the `X-CRM: 1` header.
 
 - `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`, `POST /api/auth/password`.
 - Admins: `GET/POST /api/users`, `PATCH /api/users/{id}` (`name`, `role`, `active`, `password`).
+- Admins: `GET/PUT /api/users/{id}/funds` with `{"<fund_id>": "viewer" | "editor"}` (omitted funds = no access).
+- Every record returned carries `_can_edit` and `_can_delete` for the signed-in user.
 - `GET /api/audit?entity=lps&entity_id=1` for change history.
 
 - `GET/POST /api/{entity}`, `GET/PATCH/DELETE /api/{entity}/{id}` for

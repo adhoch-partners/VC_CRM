@@ -92,9 +92,23 @@ def test_viewer_is_read_only(client, viewer):
     assert viewer.post("/api/lps", json={"name": "x"}).status_code == 403
     assert viewer.patch(f"/api/lps/{lp['id']}", json={"name": "y"}).status_code == 403
     assert viewer.delete(f"/api/lps/{lp['id']}").status_code == 403
-    assert viewer.post("/api/capital-events", json={}).status_code == 403
-    assert viewer.patch("/api/allocations/1", json={"paid": True}).status_code == 403
     assert viewer.get("/api/users").status_code == 403
+
+    # With view access to a fund, its capital data is visible but not changeable.
+    fund = client.post("/api/funds", json={"name": "F"}).json()
+    client.post("/api/commitments", json={"lp_id": lp["id"], "fund_id": fund["id"],
+                                          "stage": "Closed", "committed_amount": 100})
+    ev = client.post("/api/capital-events", json={
+        "fund_id": fund["id"], "event_type": "Capital call", "event_date": "2026-01-01",
+        "total_amount": 10}).json()
+    vid = viewer.get("/api/auth/me").json()["id"]
+    client.put(f"/api/users/{vid}/funds", json={str(fund["id"]): "viewer"})
+    assert viewer.get("/api/capital-events").json()[0]["_can_edit"] is False
+    assert viewer.post("/api/capital-events", json={
+        "fund_id": fund["id"], "event_type": "Capital call", "event_date": "2026-01-02",
+        "total_amount": 10}).status_code == 403
+    alloc = viewer.get(f"/api/capital-events/{ev['id']}/allocations").json()[0]
+    assert viewer.patch(f"/api/allocations/{alloc['id']}", json={"paid": True}).status_code == 403
 
 
 def test_editor_edits_but_cannot_manage_users(editor):
