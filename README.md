@@ -148,6 +148,10 @@ pytest
 - **Linked funds:** an LP is linked to the funds it has commitments in; a company to its target
   fund and any fund with an investment, mark or exit in it. Someone with access to only Fund II
   sees a shared LP with only its Fund II commitment, and never Fund I amounts.
+- **Rounds and round pipelines** follow their company: visible to anyone who can see the
+  company, changeable only by editors on a fund that invested in it (the general role is not
+  enough, since rounds hold our pro-rata decisions). The **Investors** directory is visible to
+  everyone; which rounds an investor is in is only visible for companies you can see.
 - **Unlinked records** (an LP with no commitments yet, a deal not yet assigned to a fund) are
   visible to everyone, so the team can work the top of both pipelines.
 - **General role** (editor / viewer) only governs shared records: an editor can change contact
@@ -212,6 +216,9 @@ Things to be aware of:
 | Funds & capital | Grid | Fund list with committed, % of target, called, uncalled, distributed, DPI, and capital called but not yet invested. LP capital accounts (paid-in, unfunded, distributed, DPI per LP). Capital calls and distributions with per-LP allocation and paid/received tracking. |
 | Deal pipeline | Board / Grid | One card per company. Stages: Sourced, First meeting, Diligence, IC review, Term sheet, Invested, Passed. Dropping on **Passed** asks for a pass reason. |
 | Portfolio | Grid | One row per company per fund: invested, realized, unrealized, total value, MOIC, IRR, valuation basis. |
+| Rounds | Grid | Every portfolio company round: status, target, committed so far (outside investors at "Committed" plus our checks linked to the round), % of target, final size, pre-money, lead, our pro-rata right and decision. Add rounds here or on a company's **Rounds** tab; only companies we have invested in can have rounds. |
+| Round pipeline | Board / Grid | One round at a time. Outside investors move through Target, Intro made, Pitched, Diligence, Term sheet, Committed, Passed, with role (lead / co-lead / participant), amount, who made the intro and next steps. Header shows target, committed, % of target, lead, and our pro-rata. Dropping on **Committed** asks for the amount; you can type a new investor's name when adding one. |
+| Investors | Grid | Directory of outside funds and angels (type, contact, stage focus, check size) with how many rounds each is active or committed in. |
 | Users (admins only) | Grid | Invite users, set roles, reset passwords, deactivate. |
 | All companies | Grid | Every company regardless of stage. The drawer has tabs for investments, valuations and realizations. |
 

@@ -15,7 +15,7 @@ from .entities import CAPITAL_EVENT_FIELDS, DEAL_STAGES, ENTITIES, LP_STAGES
 STATIC = Path(__file__).with_name("static")
 
 # Records that own activity-log rows; deleting one also deletes its log.
-ACTIVITY_OWNERS = {"lps", "commitments", "companies", "funds"}
+ACTIVITY_OWNERS = {"lps", "commitments", "companies", "funds", "investors", "rounds"}
 
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -77,6 +77,21 @@ def _integrity(e):
         return HTTPException(409, "A record with these values already exists "
                                   "(each LP can have one commitment per fund).")
     return HTTPException(400, "Invalid value for this record.")
+
+
+def check_rules(conn, entity, row):
+    """Cross-record rules, checked on the full new record (create, or old merged with changes)."""
+    if entity == "rounds":
+        invested = conn.execute("SELECT 1 FROM investments WHERE company_id = ? LIMIT 1",
+                                (row["company_id"],)).fetchone()
+        if not invested:
+            raise HTTPException(400, "Rounds are tracked for portfolio companies. Record an "
+                                     "investment in this company first.")
+    if entity == "investments" and row.get("round_id") is not None:
+        rnd = conn.execute("SELECT company_id FROM rounds WHERE id = ?",
+                           (row["round_id"],)).fetchone()
+        if rnd and rnd["company_id"] != row["company_id"]:
+            raise HTTPException(400, "The linked round belongs to a different company.")
 
 
 def audit(conn, user, action, entity, entity_id, changes=None):
@@ -564,6 +579,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         if not acc.can_create(entity, row):
             raise deny("Only admins can create funds." if entity == "funds" else
                        "You need editor access to this fund (or record) to add that.")
+        check_rules(conn, entity, row)
         try:
             with conn.transaction():
                 rid = conn.insert(entity, row)
@@ -581,7 +597,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         if not acc.can_edit(entity, old):
             raise deny("You have view-only access to this record.")
         changed = {k: v for k, v in row.items() if old.get(k) != v}
-        moves = {"fund_id", "entity", "entity_id"} & set(changed)
+        moves = {"fund_id", "entity", "entity_id", "company_id", "round_id"} & set(changed)
         if moves:
             # Moving a record to another fund (or parent) needs edit rights on both ends.
             if not acc.can_create(entity, {**old, **changed}):
@@ -589,6 +605,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
             if entity == "companies" and old["fund_id"] is not None \
                     and not acc.can_edit_fund(old["fund_id"]):
                 raise deny("You need editor access to this company's current fund to change it.")
+        if changed:
+            check_rules(conn, entity, {**old, **changed})
         if changed:
             try:
                 with conn.transaction():
@@ -620,6 +638,10 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
                         conn.execute(
                             "DELETE FROM activities WHERE entity = 'commitments' AND entity_id "
                             "IN (SELECT id FROM commitments WHERE lp_id = ?)", (rid,))
+                    if entity == "companies":
+                        conn.execute(
+                            "DELETE FROM activities WHERE entity = 'rounds' AND entity_id "
+                            "IN (SELECT id FROM rounds WHERE company_id = ?)", (rid,))
                 conn.execute(f"DELETE FROM {entity} WHERE id = ?", (rid,))
                 audit(conn, acc.user, "delete", entity, rid, old)
         except IntegrityError as e:

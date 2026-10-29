@@ -134,6 +134,7 @@ class Database:
 # Columns added after the first release, so existing databases pick them up.
 ADDED_COLUMNS = [
     ("activities", "created_by", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
+    ("investments", "round_id", "INTEGER REFERENCES rounds(id) ON DELETE SET NULL"),
 ]
 
 

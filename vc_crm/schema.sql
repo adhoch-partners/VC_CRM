@@ -133,6 +133,57 @@ CREATE TABLE IF NOT EXISTS companies (
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Outside funds and angels: a shared directory, like LPs.
+CREATE TABLE IF NOT EXISTS investors (
+    id             INTEGER PRIMARY KEY,
+    name           TEXT NOT NULL,
+    investor_type  TEXT,
+    contact_name   TEXT,
+    email          TEXT,
+    phone          TEXT,
+    website        TEXT,
+    location       TEXT,
+    stage_focus    TEXT,
+    check_size_min REAL,
+    check_size_max REAL,
+    notes          TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- A financing round of a portfolio company (ours or anyone's money).
+CREATE TABLE IF NOT EXISTS rounds (
+    id                INTEGER PRIMARY KEY,
+    company_id        INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    round_name        TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'Planning',
+    target_size       REAL,
+    final_size        REAL,
+    pre_money         REAL,
+    close_date        TEXT,
+    lead_investor_id  INTEGER REFERENCES investors(id) ON DELETE SET NULL,
+    pro_rata_amount   REAL,
+    pro_rata_decision TEXT,
+    notes             TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One row per outside investor per round: the card on a round's pipeline board.
+CREATE TABLE IF NOT EXISTS round_investors (
+    id             INTEGER PRIMARY KEY,
+    round_id       INTEGER NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
+    investor_id    INTEGER NOT NULL REFERENCES investors(id) ON DELETE RESTRICT,
+    stage          TEXT NOT NULL DEFAULT 'Target',
+    participation  TEXT,
+    amount         REAL,
+    intro_by       TEXT,
+    owner          TEXT,
+    next_step      TEXT,
+    next_step_date TEXT,
+    notes          TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (round_id, investor_id)
+);
+
 CREATE TABLE IF NOT EXISTS investments (
     id                   INTEGER PRIMARY KEY,
     company_id           INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -140,6 +191,7 @@ CREATE TABLE IF NOT EXISTS investments (
     investment_date      TEXT NOT NULL,
     round_name           TEXT,
     instrument           TEXT,
+    round_id             INTEGER REFERENCES rounds(id) ON DELETE SET NULL,
     amount               REAL NOT NULL CHECK (amount > 0),
     shares               REAL,
     price_per_share      REAL,
@@ -193,4 +245,6 @@ CREATE INDEX IF NOT EXISTS idx_valuations_company ON valuations(company_id);
 CREATE INDEX IF NOT EXISTS idx_realizations_company ON realizations(company_id);
 CREATE INDEX IF NOT EXISTS idx_activities_entity ON activities(entity, entity_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_rounds_company ON rounds(company_id);
+CREATE INDEX IF NOT EXISTS idx_round_investors_round ON round_investors(round_id);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id);

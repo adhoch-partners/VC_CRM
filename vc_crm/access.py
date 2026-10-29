@@ -14,6 +14,14 @@ linked fund, or when their general role is editor and they can see it.
 Deleting one also deletes its fund-level children, so that additionally needs
 editor access on every linked fund.
 
+Investors (outside funds and angels) are a directory everyone can see; anyone
+who can create shared records can maintain it.
+
+A portfolio company's rounds, and each round's investor pipeline, follow the
+company: visible to whoever can see the company, changeable only by editors
+on a fund linked to it (the general role is not enough: rounds carry our
+pro-rata decisions).
+
 The user's general role (editor / viewer) only governs shared records.
 """
 
@@ -22,7 +30,8 @@ from fastapi import HTTPException
 LEVELS = ["viewer", "editor"]
 FUND_KEYED = {"commitments", "investments", "valuations", "realizations", "capital_events"}
 SHARED = {"lps", "companies"}
-PARENTS = {"lps", "commitments", "companies", "funds"}  # what activities can attach to
+ROUND_SCOPED = {"rounds", "round_investors"}
+PARENTS = {"lps", "commitments", "companies", "funds", "investors", "rounds"}  # activity targets
 
 
 class Access:
@@ -100,15 +109,27 @@ class Access:
         return (any(self.can_edit_fund(f) for f in links)
                 or (self.general_edit and self._shared_view(links)))
 
-    def parent(self, act):
-        key = (act["entity"], act["entity_id"])
+    def _row(self, table, rid):
+        key = (table, rid)
         if key not in self._parents:
-            row = None
-            if act["entity"] in PARENTS:
-                row = self.conn.execute(f"SELECT * FROM {act['entity']} WHERE id = ?",
-                                        (act["entity_id"],)).fetchone()
+            row = self.conn.execute(f"SELECT * FROM {table} WHERE id = ?", (rid,)).fetchone()
             self._parents[key] = dict(row) if row else None
         return self._parents[key]
+
+    def parent(self, act):
+        return self._row(act["entity"], act["entity_id"]) if act["entity"] in PARENTS else None
+
+    def _round_company(self, entity, row):
+        """The company a round (or a round pipeline entry) belongs to."""
+        if entity == "round_investors":
+            row = self._row("rounds", row.get("round_id"))
+            if row is None:
+                return None
+        return self._row("companies", row.get("company_id"))
+
+    def _company_editor(self, company):
+        return company is not None and any(
+            self.can_edit_fund(f) for f in self.links("companies", company))
 
     # ---------------------------------------------------------------- record checks
 
@@ -121,6 +142,11 @@ class Access:
             return self.can_view_fund(row["fund_id"])
         if entity in SHARED:
             return self._shared_view(self.links(entity, row))
+        if entity == "investors":
+            return True
+        if entity in ROUND_SCOPED:
+            company = self._round_company(entity, row)
+            return company is not None and self.can_view("companies", company)
         if entity == "activities":
             p = self.parent(row)
             return p is not None and self.can_view(row["entity"], p)
@@ -135,6 +161,10 @@ class Access:
             return self.can_edit_fund(row["fund_id"])
         if entity in SHARED:
             return self._shared_edit(self.links(entity, row))
+        if entity == "investors":
+            return self.can_create_shared
+        if entity in ROUND_SCOPED:
+            return self._company_editor(self._round_company(entity, row))
         if entity == "activities":
             p = self.parent(row)
             return p is not None and self.can_edit(row["entity"], p)
@@ -158,8 +188,10 @@ class Access:
             return False
         if entity in FUND_KEYED:
             return self.can_edit_fund(row.get("fund_id"))
-        if entity == "lps":
+        if entity in ("lps", "investors"):
             return self.can_create_shared
+        if entity in ROUND_SCOPED:
+            return self._company_editor(self._round_company(entity, row))
         if entity == "companies":
             fid = row.get("fund_id")
             return self.can_edit_fund(fid) if fid is not None else self.can_create_shared

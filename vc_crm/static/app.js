@@ -52,7 +52,7 @@ const fmt = {
   num: (v) => (v == null || v === "" ? "" : Number(v).toLocaleString()),
 };
 
-const S = { meta: null, me: null, people: {}, look: { funds: {}, lps: {}, companies: {} }, view: null, prefs: {} };
+const S = { meta: null, me: null, people: {}, look: { funds: {}, lps: {}, companies: {}, investors: {}, rounds: {} }, view: null, prefs: {} };
 const isAdmin = () => Boolean(S.me?.admin);
 // Per-record rights come from the server as _can_edit / _can_delete on each row.
 // These only decide which "create" buttons to offer.
@@ -69,14 +69,20 @@ function pref(key, value) {
 }
 
 async function loadLookups() {
-  const [funds, lps, companies, people, me] = await Promise.all(
-    ["funds", "lps", "companies", "users/directory", "auth/me"].map((e) => api("GET", `/api/${e}`)));
+  const [funds, lps, companies, people, me, investors, rounds] = await Promise.all(
+    ["funds", "lps", "companies", "users/directory", "auth/me", "investors", "rounds"]
+      .map((e) => api("GET", `/api/${e}`)));
   S.me = me; // picks up fund access changes an admin made since sign-in
   S.people = Object.fromEntries(people.map((u) => [u.id, u.name]));
   S.look.funds = Object.fromEntries(funds.map((r) => [r.id, r]));
   S.look.lps = Object.fromEntries(lps.map((r) => [r.id, r]));
   S.look.companies = Object.fromEntries(companies.map((r) => [r.id, r]));
+  S.look.investors = Object.fromEntries(investors.map((r) => [r.id, r]));
+  // Rounds are labeled "Company · Series A" wherever they are picked or shown.
+  S.look.rounds = Object.fromEntries(rounds.map((r) => [r.id, { ...r, name: roundLabel(r) }]));
 }
+
+const roundLabel = (r) => `${S.look.companies[r.company_id]?.name ?? "Company"} · ${r.round_name}`;
 
 const fieldsOf = (entity) => S.meta.entities[entity].fields;
 const fieldOf = (entity, name) => fieldsOf(entity).find((f) => f.name === name);
@@ -357,7 +363,13 @@ function formValues(form, fields, original = null) {
   return out;
 }
 
-const ACTIVITY_OWNERS = ["lps", "commitments", "companies", "funds"];
+const ACTIVITY_OWNERS = ["lps", "commitments", "companies", "funds", "investors", "rounds"];
+
+// Pipeline forms where you can type a new LP / investor instead of creating it first.
+const INLINE_NEW = {
+  commitments: { field: "lp_id", entity: "lps", label: "Or new LP name", what: "LP" },
+  round_investors: { field: "investor_id", entity: "investors", label: "Or new investor name", what: "investor" },
+};
 
 function recordTitle(entity, r) {
   if (!r?.id) return `New ${S.meta.entities[entity].label.replace(/s$/, "").toLowerCase()}`;
@@ -383,35 +395,37 @@ async function editRecord(entity, row, after, defaults = {}) {
     <div data-extra></div>`);
   const form = $("form", d);
   if (ro) form.querySelectorAll("input,select,textarea").forEach((x) => (x.disabled = true));
-  // Adding a prospect to the pipeline: allow typing a brand-new LP instead of
-  // having to create it on the LPs screen first.
-  const newLp = isNew && entity === "commitments" && canCreateShared() && !defaults.lp_id;
-  if (newLp) {
+  // Adding to a pipeline: allow typing a brand-new LP / investor instead of
+  // having to create it on its own screen first.
+  const inline = isNew && canCreateShared() ? INLINE_NEW[entity] : null;
+  const newRef = inline && !defaults[inline.field] ? inline : null;
+  if (newRef) {
     const label = document.createElement("label");
-    label.innerHTML = `Or new LP name<input type="text" name="_new_lp" placeholder="Type to create a new LP">`;
-    form.elements.lp_id.closest("label").after(label);
-    if (!Object.keys(S.look.lps).length) form.elements._new_lp.focus();
+    label.innerHTML = `${newRef.label}<input type="text" name="_new_ref" placeholder="Type to create a new ${newRef.what}">`;
+    form.elements[newRef.field].closest("label").after(label);
+    if (!Object.keys(S.look[newRef.entity]).length) form.elements._new_ref.focus();
   }
   $("[data-cancel]", d).onclick = closeDrawer;
   const save = $("[data-save]", d);
   if (save) save.onclick = () => guard(async () => {
     const body = formValues(form, fields, isNew ? null : row);
-    let createdLp = null;
-    if (newLp) {
-      const name = form.elements._new_lp.value.trim();
-      if (name && body.lp_id) throw new Error("Choose an existing LP or type a new LP name, not both.");
-      if (!name && !body.lp_id) throw new Error("Choose an LP, or type a new LP name.");
+    let created = null;
+    if (newRef) {
+      const name = form.elements._new_ref.value.trim();
+      const what = newRef.what;
+      if (name && body[newRef.field]) throw new Error(`Choose an existing ${what} or type a new ${what} name, not both.`);
+      if (!name && !body[newRef.field]) throw new Error(`Choose an ${what}, or type a new ${what} name.`);
       if (name) {
-        createdLp = await api("POST", "/api/lps", { name });
-        body.lp_id = createdLp.id;
+        created = await api("POST", `/api/${newRef.entity}`, { name });
+        body[newRef.field] = created.id;
       }
     }
     if (isNew) {
       try {
         await api("POST", `/api/${entity}`, body);
       } catch (err) {
-        // Do not leave a stray LP behind if the pipeline entry was refused.
-        if (createdLp) await api("DELETE", `/api/lps/${createdLp.id}`).catch(() => {});
+        // Do not leave a stray LP / investor behind if the pipeline entry was refused.
+        if (created) await api("DELETE", `/api/${newRef.entity}/${created.id}`).catch(() => {});
         throw err;
       }
     } else if (Object.keys(body).length) await api("PATCH", `/api/${entity}/${row.id}`, body);
@@ -433,6 +447,8 @@ async function editRecord(entity, row, after, defaults = {}) {
     const extra = $("[data-extra]", d);
     if (entity === "companies") await companyExtras(extra, row, after);
     if (entity === "lps") await lpExtras(extra, row, after);
+    if (entity === "rounds") roundExtras(extra, row);
+    if (entity === "investors") await investorExtras(extra, row);
     if (ACTIVITY_OWNERS.includes(entity)) await activityLog(extra, entity, row.id, Boolean(row._can_edit));
     await history(extra, entity, row.id);
   }
@@ -508,7 +524,7 @@ async function lpExtras(el, lp, after) {
 async function companyExtras(el, co, after) {
   const box = document.createElement("div");
   el.append(box);
-  const tabs = [["investments", "Investments"], ["valuations", "Valuations"], ["realizations", "Realizations"]];
+  const tabs = [["investments", "Investments"], ["valuations", "Valuations"], ["realizations", "Realizations"], ["rounds", "Rounds"]];
   let cur = "investments";
   const draw = async () => {
     const rows = await api("GET", `/api/${cur}?company_id=${co.id}`);
@@ -516,7 +532,8 @@ async function companyExtras(el, co, after) {
       <div style="margin:10px 0" ${canEditSomeFund() ? "" : "hidden"}><button class="btn small" data-add>+ Add ${cur.replace(/s$/, "")}</button></div><div data-g></div>`;
     box.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { cur = b.dataset.t; draw(); }));
     const defaults = { company_id: co.id, fund_id: co.fund_id ?? "" };
-    defaults[{ investments: "investment_date", valuations: "valuation_date", realizations: "realization_date" }[cur]] = today();
+    const dateField = { investments: "investment_date", valuations: "valuation_date", realizations: "realization_date" }[cur];
+    if (dateField) defaults[dateField] = today();
     $("[data-add]", box).onclick = () => editRecord(cur, null, () => { after?.(); }, defaults);
     renderGrid($("[data-g]", box), {
       entity: cur, rows, search: false,
@@ -528,6 +545,26 @@ async function companyExtras(el, co, after) {
   await draw();
 }
 
+function roundExtras(el, rnd) {
+  const box = document.createElement("div");
+  box.innerHTML = `<div class="section-title">Investor pipeline
+    <button class="btn small">Open pipeline board</button></div>`;
+  $("button", box).onclick = () => { pref("round", rnd.id); closeDrawer(); go("round-board"); };
+  el.append(box);
+}
+
+async function investorExtras(el, inv) {
+  const rows = await api("GET", `/api/round_investors?investor_id=${inv.id}`);
+  const box = document.createElement("div");
+  box.innerHTML = `<div class="section-title">Rounds they are in</div><div></div>`;
+  el.append(box);
+  renderGrid(box.lastElementChild, {
+    entity: "round_investors", rows, search: false,
+    cols: ["round_id", "stage", "participation", "amount"],
+    onOpen: (r) => editRecord("round_investors", r),
+  });
+}
+
 // ------------------------------------------------------------------ views
 
 const VIEWS = {};
@@ -535,7 +572,10 @@ const VIEWS = {};
 VIEWS.dashboard = {
   title: "Dashboard",
   async render(el) {
-    const d = await api("GET", "/api/dashboard");
+    const [d, rounds, pipe, inv] = await Promise.all([api("GET", "/api/dashboard"),
+      api("GET", "/api/rounds"), api("GET", "/api/round_investors"), api("GET", "/api/investments")]);
+    const live = rounds.filter((r) => ["Raising", "Planning"].includes(r.status));
+    const totals = roundTotals(pipe, inv);
     const p = d.portfolio;
     const raising = d.funds.filter((f) => f.status === "Raising");
     el.innerHTML = `
@@ -560,7 +600,20 @@ VIEWS.dashboard = {
           <div style="display:flex;justify-content:space-between;padding:3px 0"><span>${esc(s)}</span><b>${n}</b></div>`).join("")}</div>
       </div>
       <div class="panel"><h2>Next steps due in the next 14 days or overdue</h2><div data-tasks></div></div>
+      <div class="panel"><h2>Portfolio rounds in progress</h2><div data-rounds></div></div>
       <div class="panel"><h2>Funds</h2><div data-funds></div></div>`;
+    renderGrid($("[data-rounds]", el), {
+      rows: live, search: false,
+      cols: [
+        { name: "round", label: "Round", value: (r) => esc(roundLabel(r)) },
+        { name: "status", label: "Status", value: (r) => `<span class="pill">${esc(r.status)}</span>` },
+        { name: "target_size", label: "Target", num: true, value: (r) => fmt.money(r.target_size) },
+        { name: "committed", label: "Committed", num: true, value: (r) => fmt.money(totals(r.id).total) },
+        { name: "pct", label: "% of target", num: true, value: (r) => fmt.pct(r.target_size ? totals(r.id).total / r.target_size : null, 0) },
+        { name: "pro_rata_decision", label: "Our pro-rata", value: (r) => esc([fmt.money(r.pro_rata_amount), r.pro_rata_decision].filter(Boolean).join(" · ")) },
+      ],
+      onOpen: (r) => { pref("round", r.id); go("round-board"); },
+    });
     renderGrid($("[data-tasks]", el), {
       rows: d.tasks.map((t, i) => ({ ...t, _id: t.id, id: `${t.entity}-${t.id}` })), search: false,
       cols: [
@@ -798,6 +851,124 @@ VIEWS["deal-board"] = {
   },
 };
 
+/** Committed money per round: outside investors at "Committed" plus our linked checks. */
+function roundTotals(pipe, investments) {
+  const outside = {}, ours = {};
+  for (const x of pipe) if (x.stage === "Committed") outside[x.round_id] = (outside[x.round_id] || 0) + (x.amount || 0);
+  for (const x of investments) if (x.round_id) ours[x.round_id] = (ours[x.round_id] || 0) + x.amount;
+  return (id) => ({ outside: outside[id] || 0, ours: ours[id] || 0, total: (outside[id] || 0) + (ours[id] || 0) });
+}
+
+const ROUND_STATUS_ORDER = ["Raising", "Planning", "Closed", "Abandoned"];
+
+VIEWS.rounds = {
+  title: "Rounds",
+  async render(el, actions) {
+    actions.append(buttonIf(canEditSomeFund(), "+ New round", () => editRecord("rounds", null, render), "primary"));
+    const [rounds, pipe, inv] = await Promise.all(["rounds", "round_investors", "investments"].map((e) => api("GET", `/api/${e}`)));
+    const totals = roundTotals(pipe, inv);
+    el.onclick = (e) => {
+      const x = e.target.closest("[data-pipe]");
+      if (x) { pref("round", Number(x.dataset.pipe)); go("round-board"); }
+    };
+    renderGrid(el, {
+      entity: "rounds", rows: rounds,
+      cols: ["company_id", "round_name", "status", "target_size",
+        { name: "committed", label: "Committed (incl. ours)", num: true, editable: false,
+          value: (r) => fmt.money(totals(r.id).total), sortValue: (r) => totals(r.id).total },
+        { name: "pct", label: "% of target", num: true, editable: false,
+          value: (r) => fmt.pct(r.target_size ? totals(r.id).total / r.target_size : null, 0) },
+        "final_size", "pre_money", "close_date", "lead_investor_id", "pro_rata_amount", "pro_rata_decision",
+        { name: "pipeline", label: "", editable: false, value: (r) => `<span class="link" data-pipe="${r.id}">Pipeline</span>` }],
+      onOpen: (r) => editRecord("rounds", r, render),
+      onChanged: loadLookups,
+    });
+  },
+};
+
+VIEWS["round-board"] = {
+  title: "Round pipeline",
+  async render(el, actions) {
+    const rounds = (await api("GET", "/api/rounds"))
+      .sort((a, b) => ROUND_STATUS_ORDER.indexOf(a.status) - ROUND_STATUS_ORDER.indexOf(b.status));
+    if (!rounds.length) {
+      el.innerHTML = `<div class="panel empty">No rounds yet. Open a portfolio company and add one on its Rounds tab, or use Rounds &gt; + New round.</div>`;
+      return;
+    }
+    const rnd = rounds.find((r) => r.id === Number(pref("round"))) ?? rounds[0];
+    pref("round", rnd.id);
+    const sel = document.createElement("select");
+    sel.innerHTML = rounds.map((r) => `<option value="${r.id}" ${r.id === rnd.id ? "selected" : ""}>${esc(roundLabel(r))} (${esc(r.status)})</option>`).join("");
+    sel.onchange = () => { pref("round", Number(sel.value)); render(); };
+    const mode = pref("roundMode") ?? "board";
+    actions.append(sel,
+      segmented([["board", "Board"], ["grid", "Grid"]], mode, (m) => { pref("roundMode", m); render(); }),
+      button("Round details", () => editRecord("rounds", rnd, render)),
+      buttonIf(rnd._can_edit, "+ Add investor", () => editRecord("round_investors", null, render, { round_id: rnd.id }), "primary"));
+
+    const [rows, inv] = await Promise.all([api("GET", `/api/round_investors?round_id=${rnd.id}`), api("GET", `/api/investments?round_id=${rnd.id}`)]);
+    const t = roundTotals(rows, inv)(rnd.id);
+    el.innerHTML = `<div class="kpis">
+        <div class="kpi"><div class="label">Target</div><div class="value">${fmt.money(rnd.target_size) || "n/a"}</div>
+          <div class="sub">${esc(rnd.round_name)} · ${esc(rnd.status)}${rnd.pre_money ? ` · ${fmt.money(rnd.pre_money)} pre` : ""}</div></div>
+        <div class="kpi"><div class="label">Committed</div><div class="value">${fmt.money(t.total)}</div>
+          <div class="sub">${fmt.pct(rnd.target_size ? t.total / rnd.target_size : null, 0)} of target</div></div>
+        <div class="kpi"><div class="label">From outside investors</div><div class="value">${fmt.money(t.outside)}</div>
+          <div class="sub">Lead: ${esc(refLabel("investors", rnd.lead_investor_id)
+            || rows.filter((r) => r.participation === "Lead").map((r) => refLabel("investors", r.investor_id)).join(", ")
+            || "not set")}</div></div>
+        <div class="kpi"><div class="label">Our pro-rata right</div><div class="value">${fmt.money(rnd.pro_rata_amount) || "n/a"}</div>
+          <div class="sub">${esc(rnd.pro_rata_decision || "No decision")} · ${fmt.money(t.ours)} invested in this round</div></div>
+      </div><div data-board></div>`;
+    const target = $("[data-board]", el);
+    if (mode === "board") {
+      renderBoard(target, {
+        entity: "round_investors", stageField: "stage", stages: fieldOf("round_investors", "stage").options, rows,
+        amount: (r) => r.amount,
+        onOpen: (r) => editRecord("round_investors", r, render),
+        onMove: (r, stage) => {
+          if (stage !== "Committed" || r.amount) return {};
+          const v = prompt(`Amount committed by ${refLabel("investors", r.investor_id)}, in $000s (5250 = $5.25M)?`, "");
+          return v === null ? false : { amount: fromThousands(v) };
+        },
+        card: (r) => `<div class="title">${esc(refLabel("investors", r.investor_id))}</div>
+          <div class="meta">${[r.participation, r.intro_by ? `intro: ${r.intro_by}` : "", r.owner].filter(Boolean).map(esc).join(" · ")}</div>
+          ${r.amount ? `<div class="amt">${fmt.money(r.amount)}</div>` : ""}
+          ${r.next_step ? `<div class="meta ${dueClass(r.next_step_date)}">${esc(r.next_step)}${r.next_step_date ? ` · ${esc(r.next_step_date)}` : ""}</div>` : ""}`,
+      });
+    } else {
+      renderGrid(target, {
+        entity: "round_investors", rows,
+        cols: ["investor_id", "stage", "participation",
+          { name: "amount", total: (l) => fmt.money(l.reduce((s, r) => s + (r.amount || 0), 0)) },
+          "intro_by", "owner", "next_step", "next_step_date"],
+        onOpen: (r) => editRecord("round_investors", r, render),
+      });
+    }
+  },
+};
+
+VIEWS.investors = {
+  title: "Investors",
+  async render(el, actions) {
+    actions.append(buttonIf(canCreateShared(), "+ New investor", () => editRecord("investors", null, render), "primary"));
+    const [rows, pipe] = await Promise.all([api("GET", "/api/investors"), api("GET", "/api/round_investors")]);
+    const active = {}, committed = {};
+    for (const x of pipe) {
+      if (x.stage === "Committed") committed[x.investor_id] = (committed[x.investor_id] || 0) + 1;
+      else if (x.stage !== "Passed") active[x.investor_id] = (active[x.investor_id] || 0) + 1;
+    }
+    renderGrid(el, {
+      entity: "investors", rows,
+      cols: ["name", "investor_type", "contact_name", "email", "location", "stage_focus", "check_size_min", "check_size_max",
+        { name: "active", label: "Active in rounds", num: true, editable: false, value: (r) => active[r.id] || "", sortValue: (r) => active[r.id] || 0 },
+        { name: "committed", label: "Committed in", num: true, editable: false, value: (r) => committed[r.id] || "", sortValue: (r) => committed[r.id] || 0 }],
+      onOpen: (r) => editRecord("investors", r, render),
+      onChanged: loadLookups,
+    });
+  },
+};
+
 VIEWS.companies = {
   title: "All companies",
   async render(el, actions) {
@@ -1018,6 +1189,7 @@ async function render() {
   const actions = $("#view-actions");
   actions.innerHTML = "";
   const el = $("#view");
+  el.onclick = null; // a view may attach one; never let it leak into the next view
   try {
     await v.render(el, actions);
   } catch (e) {

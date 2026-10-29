@@ -31,6 +31,24 @@ VALUATION_METHODS = [
 REALIZATION_TYPES = ["Full exit", "Partial exit", "Dividend", "Write-off"]
 ACTIVITY_KINDS = ["Note", "Call", "Meeting", "Email"]
 
+INVESTOR_TYPES = [
+    "VC fund", "Corporate VC", "Growth fund", "Angel", "Angel group", "Family office",
+    "Accelerator", "Strategic", "Other",
+]
+ROUND_NAMES = [
+    "Pre-seed", "Seed", "Seed extension", "Series A", "Series A extension", "Series B",
+    "Series C", "Series D+", "Bridge", "Other",
+]
+ROUND_STATUSES = ["Planning", "Raising", "Closed", "Abandoned"]
+PRO_RATA_DECISIONS = ["Undecided", "Taking full", "Taking partial", "Passing"]
+# Ordered left to right on a round's investor pipeline board.
+ROUND_INVESTOR_STAGES = [
+    "Target", "Intro made", "Pitched", "Diligence", "Term sheet", "Committed", "Passed",
+]
+PARTICIPATION = ["Lead", "Co-lead", "Participant"]
+# Records an activity-log entry can be attached to.
+ACTIVITY_PARENTS = ["lps", "commitments", "companies", "funds", "investors", "rounds"]
+
 
 def f(name, label, type_="text", **kw):
     return {"name": name, "label": label, "type": type_, **kw}
@@ -122,6 +140,7 @@ ENTITIES = {
             f("investment_date", "Date", "date", required=True),
             f("round_name", "Round"),
             f("instrument", "Instrument", "select", options=INSTRUMENTS),
+            f("round_id", "Linked round", "ref", ref="rounds"),
             f("amount", "Amount invested", "money", required=True),
             f("shares", "Shares", "number"),
             f("price_per_share", "Price / share", "number"),
@@ -156,13 +175,67 @@ ENTITIES = {
             f("notes", "Notes", "longtext"),
         ],
     },
+    "investors": {
+        "label": "Investors",
+        "title": "name",
+        "order": "name",
+        "fields": [
+            f("name", "Investor / firm", required=True),
+            f("investor_type", "Type", "select", options=INVESTOR_TYPES),
+            f("contact_name", "Primary contact"),
+            f("email", "Email"),
+            f("phone", "Phone"),
+            f("website", "Website"),
+            f("location", "Location"),
+            f("stage_focus", "Stage focus"),
+            f("check_size_min", "Check size from", "money"),
+            f("check_size_max", "Check size to", "money"),
+            f("notes", "Notes", "longtext"),
+        ],
+    },
+    "rounds": {
+        "label": "Rounds",
+        "title": "round_name",
+        "order": "close_date DESC NULLS FIRST, id DESC",
+        "fields": [
+            f("company_id", "Company", "ref", ref="companies", required=True),
+            f("round_name", "Round", "select", options=ROUND_NAMES, required=True),
+            f("status", "Status", "select", options=ROUND_STATUSES, default="Planning"),
+            f("target_size", "Target size", "money"),
+            f("final_size", "Final size", "money"),
+            f("pre_money", "Pre-money valuation", "money"),
+            f("close_date", "Close date", "date"),
+            f("lead_investor_id", "Lead investor", "ref", ref="investors"),
+            f("pro_rata_amount", "Our pro-rata right", "money"),
+            f("pro_rata_decision", "Pro-rata decision", "select", options=PRO_RATA_DECISIONS),
+            f("notes", "Notes", "longtext"),
+        ],
+    },
+    "round_investors": {
+        "label": "Round investors",
+        "title": "investor_id",
+        "order": "id",
+        "board": "stage",
+        "fields": [
+            f("round_id", "Round", "ref", ref="rounds", required=True),
+            f("investor_id", "Investor", "ref", ref="investors", required=True),
+            f("stage", "Stage", "select", options=ROUND_INVESTOR_STAGES, default="Target"),
+            f("participation", "Role", "select", options=PARTICIPATION),
+            f("amount", "Amount", "money"),
+            f("intro_by", "Intro by"),
+            f("owner", "Owner"),
+            f("next_step", "Next step"),
+            f("next_step_date", "Next step date", "date"),
+            f("notes", "Notes", "longtext"),
+        ],
+    },
     "activities": {
         "label": "Activity",
         "title": "summary",
         "order": "activity_date DESC, id DESC",
         "fields": [
             f("entity", "Record type", "select",
-              options=["lps", "commitments", "companies", "funds"], required=True),
+              options=ACTIVITY_PARENTS, required=True),
             f("entity_id", "Record", "integer", required=True),
             f("activity_date", "Date", "date", required=True),
             f("kind", "Kind", "select", options=ACTIVITY_KINDS, default="Note"),
