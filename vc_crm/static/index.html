@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VC CRM</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">VC CRM</div>
+    <nav id="nav">
+      <div class="nav-group">Overview</div>
+      <a data-view="dashboard">Dashboard</a>
+      <div class="nav-group">Fundraising</div>
+      <a data-view="lp-board">LP pipeline</a>
+      <a data-view="lps">LPs</a>
+      <a data-view="funds">Funds &amp; capital</a>
+      <div class="nav-group">Investments</div>
+      <a data-view="deal-board">Deal pipeline</a>
+      <a data-view="portfolio">Portfolio</a>
+      <a data-view="companies">All companies</a>
+    </nav>
+  </aside>
+  <main>
+    <header class="topbar">
+      <h1 id="view-title"></h1>
+      <div id="view-actions" class="actions"></div>
+    </header>
+    <section id="view"></section>
+  </main>
+  <div id="drawer-backdrop" hidden></div>
+  <aside id="drawer" hidden></aside>
+  <div id="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
