@@ -7,7 +7,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY vc_crm ./vc_crm
-RUN useradd --create-home --uid 10001 crm
+# /app/data holds the SQLite file when DATABASE_URL is not set (local testing).
+RUN useradd --create-home --uid 10001 crm && mkdir -p /app/data && chown crm /app/data
 USER crm
 
 # One worker: the login throttle is in-memory, and 2-10 users do not need more.

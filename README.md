@@ -46,13 +46,69 @@ external URL on a schedule.
 GCP). Set `DATABASE_URL` to a Postgres connection string, `COOKIE_SECURE=true`, and serve it over
 HTTPS. The container listens on `$PORT` (default 8000).
 
-## Run it locally
+## Test it on your own computer
+
+Running locally uses a single SQLite file instead of Postgres, so there is nothing else to
+install. Only you can reach it (it listens on your own machine), and the data stays in the
+`data` folder until you delete it.
+
+**1. Install Python 3.11 or newer** from python.org. On Windows, tick **"Add python.exe to
+PATH"** on the first installer screen.
+
+**2. Get the code.** On GitHub, open this repository, switch to the branch you want to test,
+then **Code > Download ZIP** and unzip it. (Or `git clone` it.)
+
+**3. Open a terminal in the unzipped folder** (Windows: open the folder in File Explorer, click
+the address bar, type `powershell`, press Enter. Mac: right-click the folder > New Terminal at
+Folder.)
+
+**4. Install and start it.**
+
+Windows (PowerShell):
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+$env:ADMIN_EMAIL = "you@yourfirm.com"
+$env:ADMIN_PASSWORD = "at-least-10-characters"
+python -m uvicorn vc_crm.main:app
+```
+
+If PowerShell refuses to run `Activate.ps1`, run
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then try again.
+
+Mac / Linux:
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-ADMIN_EMAIL=you@firm.com ADMIN_PASSWORD='a long password' uvicorn vc_crm.main:app --reload
-# open http://localhost:8000
+ADMIN_EMAIL=you@yourfirm.com ADMIN_PASSWORD='at-least-10-characters' python -m uvicorn vc_crm.main:app
 ```
+
+**5. Open http://localhost:8000** and sign in with that email and password. Press `Ctrl+C` in
+the terminal to stop it.
+
+Next time, you only need to activate the environment (`.venv\Scripts\Activate.ps1` or
+`source .venv/bin/activate`) and run `python -m uvicorn vc_crm.main:app`. The admin settings
+are only used the first time, when there are no users yet.
+
+**Start over:** stop the app and delete the `data` folder. **Test with colleagues on your
+office network:** add `--host 0.0.0.0` and have them open `http://<your-computer's-IP>:8000`
+(your firewall may ask for permission). Don't expose it to the internet this way: there is no
+HTTPS locally.
+
+**Optional, closest to Render:** with Docker Desktop installed, this runs the exact image
+Render builds, using SQLite in a Docker volume:
+
+```bash
+docker build -t vc-crm .
+docker run -p 8000:8000 -v vc-crm-data:/app/data -e ADMIN_EMAIL=you@yourfirm.com -e ADMIN_PASSWORD=at-least-10-characters vc-crm
+```
+
+Local data does not move to Render automatically. Treat local testing as a trial run, and
+enter real data once the hosted version is live.
 
 Without `DATABASE_URL`, data is stored in SQLite at `./data/vc_crm.db` (`VC_CRM_DB` changes the
 path). The database starts empty: no sample data is included.
