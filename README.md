@@ -19,10 +19,13 @@ managed Postgres database that only the web service can reach.
 
 1. Create an account at render.com and connect it to the GitHub organization that owns this repo.
 2. In Render, choose **New > Blueprint**, pick this repository and the branch to deploy.
-3. Render asks for three values. These create the first admin on first start:
-   - `ADMIN_NAME`: your name
-   - `ADMIN_EMAIL`: your sign-in email
-   - `ADMIN_PASSWORD`: at least 10 characters. Use a password manager.
+3. Render asks for these values:
+   - `ADMIN_NAME`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` (10+ characters, use a password manager):
+     create the first admin on first start.
+   - `APP_URL`: the address people will use, e.g. `https://crm.yourfirm.com` (or the
+     `onrender.com` URL), used in email links.
+   - `SMTP_USERNAME`, `SMTP_PASSWORD`: the Google Workspace mailbox and app password for reset
+     emails and task reminders (see Configuration below). Leave blank to skip email for now.
 4. Click **Apply**. When the deploy is green, open the `onrender.com` URL and sign in.
 5. Go to **Admin > Users > + Invite user** to add your team. Share each temporary password
    privately; people change it under their name at the bottom of the sidebar.
@@ -41,6 +44,21 @@ Render rejects a field, the error will name it.
 **Backups:** paid Render Postgres plans include automatic backups / point-in-time recovery
 (retention depends on plan). For an extra copy you control, run `pg_dump` against the database's
 external URL on a schedule.
+
+### Go-live checklist
+
+1. Deploy the Blueprint (above) and sign in as the first admin.
+2. Security > **turn on two-factor** for yourself, then Admin > Users > tick **Require
+   two-factor for everyone**.
+3. Admin > Users > **+ Invite user** for each person; set each person's **Fund access** (new
+   users and new funds start with no access).
+4. Create the funds and fill in each fund's **Economic terms**.
+5. Load existing data with **Import** (in this order: LPs, investors, companies, people, then LP
+   pipeline entries, investments, marks, exits, rounds, KPIs). Check a few records by hand.
+6. Record capital calls and distributions, then compare one LP statement against your own model.
+7. Send yourself a password reset to confirm email works, and add a task due today to confirm the
+   morning reminder arrives the next day.
+8. Download Admin > Users > **Export everything (.zip)** and keep it as your first backup.
 
 **Other hosts:** the `Dockerfile` runs anywhere that runs containers (Fly.io, Railway, AWS, Azure,
 GCP). Set `DATABASE_URL` to a Postgres connection string, `COOKIE_SECURE=true`, and serve it over
@@ -254,6 +272,26 @@ related change is shown only to people allowed to see that record (a Fund II use
 LP sees its Fund II changes only). Deleted records keep their history on their parent records.
 History cannot be edited or deleted from the app.
 Viewers see the same screens with editing turned off.
+
+## Logging Granola meetings with Claude
+
+The repo includes a Claude Code skill (`.claude/skills/log-granola-meetings`). With Granola
+connected in Claude and Claude Code running in this project folder on your Mac:
+
+1. In the CRM: sidebar > Security > API tokens > **New token** (name it e.g. "Claude meeting
+   notes") and copy it.
+2. In Terminal, before starting Claude Code (or in your `~/.zshrc`):
+   ```bash
+   export CRM_URL=https://crm.yourfirm.com
+   export CRM_TOKEN=crm_...   # the token from step 1
+   ```
+3. In Claude Code, ask: **"Log my Granola meetings from this week to the CRM."**
+
+Claude finds the meetings, matches attendees to people, LPs, companies and investors through
+the CRM's search, and shows you the plan (which record each note goes on, the summary, and
+action items that will become tasks). Nothing is written until you approve it. Notes are saved
+as "Meeting" activities and action items as tasks, as you, with your permissions; a meeting
+already logged on that date is skipped. Revoke the token at any time under Security.
 
 ## Fund economics and LP reports
 
