@@ -140,6 +140,7 @@ ADDED_COLUMNS = [
     ("users", "totp_pending_secret", "TEXT"),
     ("users", "totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "totp_last_counter", "INTEGER"),
+    ("users", "email_reminders", "INTEGER NOT NULL DEFAULT 1"),
 ]
 
 

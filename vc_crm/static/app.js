@@ -57,7 +57,7 @@ const fmt = {
   num: (v) => (v == null || v === "" ? "" : Number(v).toLocaleString()),
 };
 
-const S = { meta: null, me: null, people: {}, look: { funds: {}, lps: {}, companies: {}, investors: {}, rounds: {} }, view: null, prefs: {} };
+const S = { meta: null, me: null, people: {}, look: { funds: {}, lps: {}, companies: {}, investors: {}, rounds: {}, users: {}, contacts: {} }, view: null, prefs: {} };
 const isAdmin = () => Boolean(S.me?.admin);
 // Per-record rights come from the server as _can_edit / _can_delete on each row.
 // These only decide which "create" buttons to offer.
@@ -74,9 +74,15 @@ function pref(key, value) {
 }
 
 async function loadLookups() {
-  const [funds, lps, companies, people, me, investors, rounds] = await Promise.all(
-    ["funds", "lps", "companies", "users/directory", "auth/me", "investors", "rounds"]
+  const [funds, lps, companies, people, me, investors, rounds, contacts, tasks] = await Promise.all(
+    ["funds", "lps", "companies", "users/directory", "auth/me", "investors", "rounds", "contacts", "tasks"]
       .map((e) => api("GET", `/api/${e}`)));
+  S.look.users = Object.fromEntries(people.map((u) => [u.id, u]));
+  S.look.contacts = Object.fromEntries(contacts.map((r) => [r.id, r]));
+  // Sidebar badge: my open tasks that are overdue or due today.
+  const due = tasks.filter((t) => t.status === "Open" && t.assignee_id === me.id && t.due_date && t.due_date <= today()).length;
+  const badge = $("#tasks-badge");
+  if (badge) { badge.textContent = due; badge.hidden = !due; }
   S.me = me; // picks up fund access changes an admin made since sign-in
   S.people = Object.fromEntries(people.map((u) => [u.id, u.name]));
   S.look.funds = Object.fromEntries(funds.map((r) => [r.id, r]));
@@ -538,9 +544,207 @@ async function editRecord(entity, row, after, defaults = {}) {
     if (entity === "lps") await lpExtras(extra, row, after);
     if (entity === "rounds") roundExtras(extra, row);
     if (entity === "investors") await investorExtras(extra, row);
+    if (entity === "contacts") await contactLinksSection(extra, row);
+    if (CONTACT_PARENTS.includes(entity)) await peopleSection(extra, entity, row);
+    if (TASK_PARENTS.includes(entity)) await tasksSection(extra, entity, row);
+    if (DOC_PARENTS.includes(entity)) await documentsSection(extra, entity, row);
     if (ACTIVITY_OWNERS.includes(entity)) await activityLog(extra, entity, row.id, Boolean(row._can_edit));
     await changeHistory(extra, entity, row.id);
   }
+}
+
+const CONTACT_PARENTS = ["lps", "investors", "companies"];
+const TASK_PARENTS = ["lps", "commitments", "companies", "funds", "investors", "rounds"];
+const DOC_PARENTS = [...TASK_PARENTS, "capital_events"];
+
+/** A short name for any record, for task and document lists. */
+function recordLabel(entity, id) {
+  if (!entity || id == null) return "";
+  if (entity === "commitments") {
+    const c = S.cache?.commitments?.[id];
+    return c ? `${refLabel("lps", c.lp_id)} / ${refLabel("funds", c.fund_id)}` : `Pipeline entry #${id}`;
+  }
+  if (entity === "capital_events") return `Capital event #${id}`;
+  return refLabel(entity, id);
+}
+
+async function openRecord(entity, id, after) {
+  editRecord(entity, await api("GET", `/api/${entity}/${id}`), after);
+}
+
+const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : "#");
+
+/** People linked to an LP / investor / company, with role and primary flag. */
+async function peopleSection(el, entity, row) {
+  const box = document.createElement("div");
+  el.append(box);
+  const draw = async () => {
+    const links = await api("GET", `/api/contact_links?entity=${entity}&entity_id=${row.id}`);
+    box.innerHTML = `<div class="section-title">People
+        ${row._can_edit ? '<button class="btn small" data-add>+ Add person</button>' : ""}</div>
+      ${links.map((l) => { const c = S.look.contacts[l.contact_id] || {};
+        return `<div class="activity"><span class="link" data-open="${l.contact_id}">${esc(c.name ?? "Person")}</span>
+          ${l.is_primary === "Yes" ? '<span class="pill">Primary</span>' : ""}
+          <span class="muted">${esc([l.role, c.email, c.phone].filter(Boolean).join(" · "))}</span>
+          ${l._can_delete ? `<span class="link" data-unlink="${l.id}" style="float:right">remove</span>` : ""}</div>`; }).join("")
+        || '<div class="muted">No people linked yet.</div>'}`;
+  };
+  box.onclick = (e) => {
+    const t = e.target.closest("[data-add],[data-open],[data-unlink]");
+    if (!t) return;
+    if (t.dataset.open) return openRecord("contacts", t.dataset.open);
+    if (t.dataset.unlink) {
+      return guard(async () => { await api("DELETE", `/api/contact_links/${t.dataset.unlink}`); draw(); });
+    }
+    addPersonDialog(box, entity, row, draw);
+  };
+  await draw();
+}
+
+function addPersonDialog(box, entity, row, after) {
+  const people = Object.values(S.look.contacts).sort((a, b) => a.name.localeCompare(b.name));
+  const holder = document.createElement("div");
+  holder.className = "panel";
+  holder.innerHTML = `<form class="form" style="margin:0">
+      <label>Existing person<select name="contact_id"><option value=""></option>${people.map((c) =>
+        `<option value="${c.id}">${esc(c.name)}${c.email ? ` (${esc(c.email)})` : ""}</option>`).join("")}</select></label>
+      <label>Or new person's name<input type="text" name="new_name"></label>
+      <label>Email (new person)<input type="text" name="email"></label>
+      <label>Role / title here<input type="text" name="role" placeholder="e.g. CIO, Founder & CEO"></label>
+      <label>Primary contact<select name="is_primary"><option>No</option><option>Yes</option></select></label>
+      <div style="align-self:end"><button class="btn primary">Add</button> <button type="button" class="btn" data-x>Cancel</button></div>
+    </form>`;
+  box.append(holder);
+  const f = $("form", holder);
+  watchDuplicates(f.new_name, "contacts");
+  $("[data-x]", holder).onclick = () => holder.remove();
+  f.onsubmit = (e) => {
+    e.preventDefault();
+    guard(async () => {
+      let id = f.contact_id.value;
+      const name = f.new_name.value.trim();
+      if (!id && !name) throw new Error("Choose a person or type a new name.");
+      if (id && name) throw new Error("Choose an existing person or type a new name, not both.");
+      if (!id) id = (await api("POST", "/api/contacts", { name, email: f.email.value })).id;
+      await api("POST", "/api/contact_links", { contact_id: id, entity, entity_id: row.id,
+        role: f.elements.role.value, is_primary: f.is_primary.value });
+      await loadLookups();
+      holder.remove();
+      after();
+    });
+  };
+}
+
+/** On a person's record: the LPs, investors and companies they are linked to. */
+async function contactLinksSection(el, contact) {
+  const box = document.createElement("div");
+  el.append(box);
+  const kinds = { lps: "LP", investors: "Investor", companies: "Company" };
+  const draw = async () => {
+    const links = await api("GET", `/api/contact_links?contact_id=${contact.id}`);
+    box.innerHTML = `<div class="section-title">Linked to</div>
+      ${links.map((l) => `<div class="activity"><span class="muted">${kinds[l.entity]}:</span>
+        <span class="link" data-open="${l.entity}:${l.entity_id}">${esc(refLabel(l.entity, l.entity_id))}</span>
+        ${l.role ? ` · ${esc(l.role)}` : ""}${l.is_primary === "Yes" ? ' <span class="pill">Primary</span>' : ""}
+        ${l._can_delete ? `<span class="link" data-unlink="${l.id}" style="float:right">remove</span>` : ""}</div>`).join("")
+        || '<div class="muted">Not linked to any LP, investor or company yet.</div>'}
+      <form class="form" style="grid-template-columns: 120px 1fr 1fr auto; align-items:end">
+        <select name="entity">${Object.entries(kinds).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
+        <select name="entity_id"></select>
+        <input type="text" name="role" placeholder="Role">
+        <button class="btn">Link</button></form>`;
+    const f = $("form", box);
+    const fill = () => {
+      const recs = Object.values(S.look[f.entity.value]).sort((a, b) => a.name.localeCompare(b.name));
+      f.entity_id.innerHTML = recs.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join("");
+    };
+    f.entity.onchange = fill;
+    fill();
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      guard(async () => {
+        await api("POST", "/api/contact_links", { contact_id: contact.id, entity: f.entity.value,
+          entity_id: f.entity_id.value, role: f.elements.role.value });
+        draw();
+      });
+    };
+  };
+  box.onclick = (e) => {
+    const t = e.target.closest("[data-open],[data-unlink]");
+    if (!t) return;
+    if (t.dataset.open) { const [en, id] = t.dataset.open.split(":"); return openRecord(en, id); }
+    guard(async () => { await api("DELETE", `/api/contact_links/${t.dataset.unlink}`); draw(); });
+  };
+  await draw();
+}
+
+/** Links to files in Drive / Dropbox / DocSend attached to a record. */
+async function documentsSection(el, entity, row) {
+  const box = document.createElement("div");
+  el.append(box);
+  const types = fieldOf("documents", "doc_type").options;
+  const draw = async () => {
+    const docs = await api("GET", `/api/documents?entity=${entity}&entity_id=${row.id}`);
+    box.innerHTML = `<div class="section-title">Documents</div>
+      ${docs.map((x) => `<div class="activity"><a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.title)}</a>
+        <span class="muted">${esc([x.doc_type, x.doc_date].filter(Boolean).join(" · "))}</span>
+        ${x._can_delete ? `<span class="link" data-del-doc="${x.id}" style="float:right">remove</span>` : ""}</div>`).join("")
+        || '<div class="muted">No documents linked.</div>'}
+      ${row._can_edit ? `<form class="form" style="grid-template-columns: 1fr 1.4fr 140px auto; align-items:end">
+        <input type="text" name="title" placeholder="Title, e.g. Q3 board deck">
+        <input type="text" name="url" placeholder="Paste a Drive / Dropbox / DocSend link">
+        <select name="doc_type"><option value="">Type</option>${types.map((t) => `<option>${esc(t)}</option>`).join("")}</select>
+        <button class="btn">Add link</button></form>` : ""}`;
+    const f = $("form", box);
+    if (f) f.onsubmit = (e) => {
+      e.preventDefault();
+      guard(async () => {
+        await api("POST", "/api/documents", { entity, entity_id: row.id, title: f.elements.title.value,
+          url: f.url.value, doc_type: f.doc_type.value, doc_date: today() });
+        draw();
+      });
+    };
+  };
+  box.onclick = (e) => {
+    const id = e.target.closest("[data-del-doc]")?.dataset.delDoc;
+    if (id) guard(async () => { await api("DELETE", `/api/documents/${id}`); draw(); });
+  };
+  await draw();
+}
+
+/** Open tasks about a record, with a quick add. */
+async function tasksSection(el, entity, row) {
+  const box = document.createElement("div");
+  el.append(box);
+  const people = Object.values(S.look.users).sort((a, b) => a.name.localeCompare(b.name));
+  const draw = async () => {
+    const tasks = (await api("GET", `/api/tasks?entity=${entity}&entity_id=${row.id}`)).filter((t) => t.status === "Open");
+    box.innerHTML = `<div class="section-title">Tasks</div>
+      ${tasks.map((t) => `<div class="activity"><label style="display:inline"><input type="checkbox" data-done="${t.id}" ${t._can_edit ? "" : "disabled"}>
+        ${esc(t.title)}</label> <span class="muted ${dueClass(t.due_date)}">${esc([t.due_date, refLabel("users", t.assignee_id)].filter(Boolean).join(" · "))}</span></div>`).join("")
+        || '<div class="muted">No open tasks.</div>'}
+      <form class="form" style="grid-template-columns: 1.6fr 130px 1fr auto; align-items:end">
+        <input type="text" name="title" placeholder="Add a task, e.g. Send follow-up deck">
+        <input type="date" name="due_date">
+        <select name="assignee_id"><option value="">Assign to...</option>${people.map((u) =>
+          `<option value="${u.id}" ${u.id === S.me.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select>
+        <button class="btn">Add</button></form>`;
+    const f = $("form", box);
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      guard(async () => {
+        await api("POST", "/api/tasks", { title: f.elements.title.value, due_date: f.due_date.value,
+          assignee_id: f.assignee_id.value, entity, entity_id: row.id });
+        await loadLookups();
+        draw();
+      });
+    };
+  };
+  box.onchange = (e) => {
+    const id = e.target.closest("[data-done]")?.dataset.done;
+    if (id) guard(async () => { await api("PATCH", `/api/tasks/${id}`, { status: "Done" }); toast("Done"); await loadLookups(); draw(); });
+  };
+  await draw();
 }
 
 async function activityLog(el, entity, id, writable) {
@@ -582,6 +786,7 @@ const ENTITY_NOUN = {
   commitments: "pipeline entry", investments: "investment", valuations: "valuation", realizations: "realization",
   capital_events: "capital event", rounds: "round", round_investors: "round investor", activities: "activity",
   lps: "LP", companies: "company", funds: "fund", investors: "investor", users: "user",
+  contacts: "person", contact_links: "person link", documents: "document", tasks: "task",
 };
 const USER_FIELDS = [
   { name: "name", label: "Name", type: "text" }, { name: "email", label: "Email", type: "text" },
@@ -622,6 +827,8 @@ function historySubject(e) {
     case "rounds": return r.company_id ? roundLabel(r) : "";
     case "round_investors": return `${refLabel("investors", r.investor_id)} in ${S.look.rounds[r.round_id]?.name ?? "a round"}`;
     case "activities": return `${r.kind ?? "Note"}: ${historyValue({ type: "longtext" }, r.summary)}`;
+    case "tasks": case "documents": return r.title ?? "";
+    case "contact_links": return `${refLabel("contacts", r.contact_id)} at ${refLabel(r.entity, r.entity_id)}${r.role ? ` (${r.role})` : ""}`;
     default: return r.name ?? "";
   }
 }
@@ -996,6 +1203,7 @@ async function showCapitalEvent(ev, after) {
     closeDrawer();
     after?.();
   });
+  await documentsSection(d, "capital_events", ev);
   await changeHistory(d, "capital_events", ev.id);
 }
 
@@ -1152,6 +1360,71 @@ VIEWS.investors = {
         { name: "active", label: "Active in rounds", num: true, editable: false, value: (r) => active[r.id] || "", sortValue: (r) => active[r.id] || 0 },
         { name: "committed", label: "Committed in", num: true, editable: false, value: (r) => committed[r.id] || "", sortValue: (r) => committed[r.id] || 0 }],
       onOpen: (r) => editRecord("investors", r, render),
+      onChanged: loadLookups,
+    });
+  },
+};
+
+VIEWS.tasks = {
+  title: "Tasks",
+  async render(el, actions) {
+    const tab = pref("taskTab") ?? "mine";
+    actions.append(
+      segmented([["mine", "My open tasks"], ["assigned", "I assigned"], ["open", "All open"], ["done", "Done"]], tab,
+        (t) => { pref("taskTab", t); render(); }),
+      button("+ New task", () => editRecord("tasks", null, render, { assignee_id: S.me.id }), "primary"));
+    const [all, commitments] = await Promise.all([api("GET", "/api/tasks"), api("GET", "/api/commitments")]);
+    S.cache = { commitments: Object.fromEntries(commitments.map((c) => [c.id, c])) };
+    const me = S.me.id;
+    const rows = all.filter((t) => ({
+      mine: t.status === "Open" && t.assignee_id === me,
+      assigned: t.status === "Open" && t.created_by === me && t.assignee_id !== me,
+      open: t.status === "Open",
+      done: t.status === "Done",
+    })[tab]);
+    el.onchange = (e) => {
+      const id = e.target.closest("[data-done]")?.dataset.done;
+      if (id) guard(async () => {
+        await api("PATCH", `/api/tasks/${id}`, { status: e.target.checked ? "Done" : "Open" });
+        await loadLookups();
+        render();
+      });
+    };
+    el.onclick = (e) => {
+      const t = e.target.closest("[data-rec]");
+      if (t) { const [en, id] = t.dataset.rec.split(":"); openRecord(en, id, render); }
+    };
+    renderGrid(el, {
+      entity: "tasks", rows,
+      cols: [
+        { name: "done", label: "", editable: false, value: (r) => `<input type="checkbox" data-done="${r.id}" ${r.status === "Done" ? "checked" : ""} ${r._can_edit ? "" : "disabled"}>` },
+        "title",
+        { name: "due_date", editable: true, value: (r) => `<span class="${r.status === "Open" ? dueClass(r.due_date) : ""}">${esc(r.due_date ?? "")}</span>` },
+        "priority", "assignee_id",
+        { name: "related", label: "Related to", editable: false, sortValue: (r) => recordLabel(r.entity, r.entity_id),
+          value: (r) => (r.entity ? `<span class="link" data-rec="${r.entity}:${r.entity_id}">${esc(recordLabel(r.entity, r.entity_id))}</span>` : "") },
+        { name: "created_by", label: "Created by", editable: false, value: (r) => esc(refLabel("users", r.created_by)) },
+      ],
+      onOpen: (r) => editRecord("tasks", r, render),
+      onChanged: loadLookups,
+    });
+  },
+};
+
+VIEWS.people = {
+  title: "People",
+  async render(el, actions) {
+    actions.append(exportButton("contacts"), buttonIf(canCreateShared(), "Import", () => importDialog("contacts", render)),
+      buttonIf(canCreateShared(), "+ New person", () => editRecord("contacts", null, render), "primary"));
+    const [rows, links] = await Promise.all([api("GET", "/api/contacts"), api("GET", "/api/contact_links")]);
+    const linked = {};
+    for (const l of links) (linked[l.contact_id] ??= []).push(refLabel(l.entity, l.entity_id) + (l.role ? ` (${l.role})` : ""));
+    renderGrid(el, {
+      entity: "contacts", rows,
+      cols: ["name", "title", "email", "phone", "location",
+        { name: "linked", label: "Linked to", editable: false, value: (r) => esc((linked[r.id] || []).join("; ")),
+          sortValue: (r) => (linked[r.id] || []).join() }],
+      onOpen: (r) => editRecord("contacts", r, render),
       onChanged: loadLookups,
     });
   },
@@ -1495,6 +1768,8 @@ async function showSecurity() {
   const tokens = await api("GET", "/api/tokens");
   const me = (S.me = await api("GET", "/api/auth/me"));
   const d = openDrawer(`<h2>Account security</h2>
+    <div class="section-title">Email reminders</div>
+    <label><input type="checkbox" data-remind ${me.email_reminders ? "checked" : ""}> Email me each morning about tasks that are overdue or due today</label>
     <div class="section-title">Two-factor sign-in</div>
     <div>${me.totp_enabled ? "On. You'll be asked for a code from your authenticator app when you sign in." : "Off. Turn it on to protect your account if your password leaks."}</div>
     <div style="margin:10px 0">${me.totp_enabled
@@ -1508,6 +1783,10 @@ async function showSecurity() {
       ${t.last_used_at ? `last used ${esc(localTime(t.last_used_at))}` : "never used"}</span>
       <span class="link" data-revoke="${t.id}" style="float:right">revoke</span></div>`).join("") || '<div class="muted">No tokens.</div>'}</div>
     <div class="drawer-actions" style="margin-top:16px"><button class="btn" data-close>Close</button></div>`);
+  $("[data-remind]", d).onchange = (e) => guard(async () => {
+    await api("PATCH", "/api/auth/preferences", { email_reminders: e.target.checked });
+    toast(e.target.checked ? "Reminders on" : "Reminders off");
+  });
   d.onclick = (e) => {
     const t = e.target.closest("[data-on],[data-off],[data-codes],[data-new],[data-revoke],[data-close]");
     if (!t) return;

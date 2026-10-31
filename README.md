@@ -255,6 +255,28 @@ LP sees its Fund II changes only). Deleted records keep their history on their p
 History cannot be edited or deleted from the app.
 Viewers see the same screens with editing turned off.
 
+## People, documents and tasks
+
+- **People** (sidebar > People) are individuals you work with. One person can be linked to
+  several LPs, investors and companies, each with a role ("CIO", "Founder & CEO") and an optional
+  Primary flag, so a person who moves firms or is both an LP contact and a co-investor is one
+  record. Add them from an LP / investor / company record (**People > + Add person**) or import a
+  CSV with optional `LP`, `Company`, `Investor` and `Role` columns. You see a person if they are
+  linked to something you can see, or not linked to anything yet. The older single "Primary
+  contact" fields on LPs and investors are still there; move them into People as you go.
+- **Documents** are links to files kept in Google Drive, Dropbox, DocSend etc., attached to LPs,
+  pipeline entries, companies, funds, investors, rounds and capital calls. The app stores the
+  link, title, type and date, not the file, so who can open the file is still controlled by
+  Drive / Dropbox. Only `https://` links are accepted.
+- **Tasks** have a due date, assignee, priority and optionally a related record. **My tasks**
+  (with a red badge for overdue / due today) lists yours; tabs show tasks you assigned, all open
+  tasks and done ones. Records show their open tasks with a quick-add. Assigning a task to
+  someone emails them. Tasks are visible to the assignee, the creator, and anyone who can see the
+  related record; a task without a record is private to its creator and assignee.
+- **Morning reminders:** each day after 7am (set `REMINDER_HOUR` / `REMINDER_TZ`, default
+  `America/New_York`) everyone with open tasks overdue or due today gets one summary email. Each
+  person can turn this off under Security in the sidebar. Requires the SMTP settings above.
+
 ## Import, export and search
 
 - **Export CSV** on the LP, pipeline, company, investor and round screens downloads the rows you

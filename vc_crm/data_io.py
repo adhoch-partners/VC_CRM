@@ -21,6 +21,8 @@ from .search import NAMED, find_duplicates, normalize
 IMPORTABLE = ["funds", "lps", "investors", "companies", "commitments", "investments",
               "valuations", "realizations", "rounds", "round_investors", "contacts"]
 MAX_ROWS = 5000
+# Extra columns a people import may have, linking each person to an organization.
+CONTACT_LINK_COLUMNS = {"lp": "lps", "company": "companies", "investor": "investors"}
 DATE_FORMATS = ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d", "%d-%b-%Y", "%b %d, %Y"]
 
 
@@ -130,7 +132,18 @@ def register(app, d):
     @app.get("/api/export/{entity}.csv")
     def export_csv(entity: str, acc=Depends(get_access), conn=Depends(get_conn)):
         check_entity(entity, set(ENTITIES) | {"capital_events"})
-        body = to_csv(export_rows(conn, acc, entity), fields_of(entity), Names(conn))
+        names = Names(conn)
+        extra = ()
+        if entity == "contacts":
+            linked = {}
+            for link in conn.execute("SELECT * FROM contact_links ORDER BY id"):
+                parent = conn.execute(f"SELECT * FROM {link['entity']} WHERE id = ?",
+                                      (link["entity_id"],)).fetchone()
+                if parent and acc.can_view(link["entity"], dict(parent)):
+                    text = parent["name"] + (f" ({link['role']})" if link["role"] else "")
+                    linked.setdefault(link["contact_id"], []).append(text)
+            extra = (("Linked to", lambda r: "; ".join(linked.get(r["id"], []))),)
+        body = to_csv(export_rows(conn, acc, entity), fields_of(entity), names, extra)
         return Response(body, media_type="text/csv", headers={
             "Content-Disposition": f'attachment; filename="{entity}-{date.today()}.csv"'})
 
@@ -195,7 +208,17 @@ def register(app, d):
         if len(rows) - 1 > MAX_ROWS:
             raise HTTPException(400, f"At most {MAX_ROWS} rows per import.")
         fields = fields_of(entity)
-        mapping, unknown = header_map(rows[0], fields)
+        headers = list(rows[0])
+        link_cols, role_col = {}, None
+        if entity == "contacts":
+            for i, h in enumerate(headers):
+                key = h.strip().lower()
+                if key in CONTACT_LINK_COLUMNS:
+                    link_cols[i] = CONTACT_LINK_COLUMNS[key]
+                    headers[i] = ""
+                elif key == "role":
+                    role_col, headers[i] = i, ""
+        mapping, unknown = header_map(headers, fields)
         if not mapping:
             raise HTTPException(400, "None of the column headers match this record type. "
                                      "Download the template to see the expected headers.")
@@ -224,6 +247,23 @@ def register(app, d):
                         continue
                     cell = ids[0]
                 values[f["name"]] = cell
+            links = []
+            for i, ref in link_cols.items():
+                cell = raw[i].strip() if i < len(raw) else ""
+                if not cell:
+                    continue
+                ids = names.find(ref, cell, acc)
+                if len(ids) != 1:
+                    problems.append(f"{ref[:-1].upper() if ref == 'lps' else ref[:-1].title()}: "
+                                    f"{'no' if not ids else 'more than one'} match for '{cell}'")
+                    continue
+                parent = conn.execute(f"SELECT * FROM {ref} WHERE id = ?", (ids[0],)).fetchone()
+                if not acc.can_edit(ref, dict(parent)):
+                    problems.append(f"You can't add people to '{cell}'")
+                    continue
+                role = raw[role_col].strip() if role_col is not None and role_col < len(raw) else ""
+                links.append({"entity": ref, "entity_id": ids[0], "role": role or None,
+                              "is_primary": "No"})
             row = None
             if not problems:
                 try:
@@ -251,7 +291,7 @@ def register(app, d):
             if fields[0]["type"] == "ref" and isinstance(label, int):
                 label = names.name(fields[0]["ref"], label)
             results.append({"row": n, "status": status, "message": message, "label": label})
-            ready.append((status, row))
+            ready.append((status, row, links))
         counts = {s: sum(1 for r in results if r["status"] == s) for s in ("ok", "duplicate", "error")}
         summary = {"columns": [f["label"] for f in mapping.values()], "ignored_columns": unknown,
                    "rows": results, "counts": counts, "imported": 0}
@@ -262,10 +302,15 @@ def register(app, d):
                                      "to import only the valid rows.")
         take = {"ok"} if data.get("skip_duplicates", True) else {"ok", "duplicate"}
         with conn.transaction():
-            for status, row in ready:
+            for status, row, links in ready:
                 if status in take:
                     rid = conn.insert(entity, row)
                     d.audit(conn, acc.user, "create", entity, rid, {**row, "imported": True},
                             record={**row, "id": rid})
+                    for link in links:
+                        link = {**link, "contact_id": rid}
+                        lid = conn.insert("contact_links", link)
+                        d.audit(conn, acc.user, "create", "contact_links", lid, link,
+                                record={**link, "id": lid})
                     summary["imported"] += 1
         return summary

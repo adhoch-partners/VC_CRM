@@ -22,6 +22,11 @@ company: visible to whoever can see the company, changeable only by editors
 on a fund linked to it (the general role is not enough: rounds carry our
 pro-rata decisions).
 
+People (contacts) are visible when linked to something the user can see, or when
+not linked to anything yet. Activity notes, document links and person links follow
+the record they are attached to. Tasks are visible to their assignee and creator, and
+to anyone who can see the record they relate to; a task with no record is personal.
+
 The user's general role (editor / viewer) only governs shared records.
 """
 
@@ -31,7 +36,9 @@ LEVELS = ["viewer", "editor"]
 FUND_KEYED = {"commitments", "investments", "valuations", "realizations", "capital_events"}
 SHARED = {"lps", "companies"}
 ROUND_SCOPED = {"rounds", "round_investors"}
-PARENTS = {"lps", "commitments", "companies", "funds", "investors", "rounds"}  # activity targets
+# Records that activities, documents, tasks and person links can be attached to.
+PARENTS = {"lps", "commitments", "companies", "funds", "investors", "rounds", "capital_events"}
+ATTACHED = {"activities", "documents", "contact_links"}  # always need a parent record
 
 
 class Access:
@@ -117,7 +124,22 @@ class Access:
         return self._parents[key]
 
     def parent(self, act):
-        return self._row(act["entity"], act["entity_id"]) if act["entity"] in PARENTS else None
+        if act.get("entity") not in PARENTS or act.get("entity_id") is None:
+            return None
+        return self._row(act["entity"], act["entity_id"])
+
+    def _contact_parents(self, contact_id):
+        """(entity, row) for every record a person is linked to (rows that still exist)."""
+        out = []
+        for link in self.conn.execute("SELECT entity, entity_id FROM contact_links "
+                                      "WHERE contact_id = ?", (contact_id,)):
+            row = self._row(link["entity"], link["entity_id"])
+            if row is not None:
+                out.append((link["entity"], row))
+        return out
+
+    def _task_mine(self, row):
+        return self.user["id"] in (row.get("assignee_id"), row.get("created_by"))
 
     def _round_company(self, entity, row):
         """The company a round (or a round pipeline entry) belongs to."""
@@ -147,9 +169,15 @@ class Access:
         if entity in ROUND_SCOPED:
             company = self._round_company(entity, row)
             return company is not None and self.can_view("companies", company)
-        if entity == "activities":
+        if entity in ATTACHED:
             p = self.parent(row)
             return p is not None and self.can_view(row["entity"], p)
+        if entity == "contacts":
+            parents = self._contact_parents(row["id"])
+            return not parents or any(self.can_view(e, r) for e, r in parents)
+        if entity == "tasks":
+            p = self.parent(row)
+            return self._task_mine(row) or (p is not None and self.can_view(row["entity"], p))
         return False
 
     def can_edit(self, entity, row):
@@ -165,9 +193,17 @@ class Access:
             return self.can_create_shared
         if entity in ROUND_SCOPED:
             return self._company_editor(self._round_company(entity, row))
-        if entity == "activities":
+        if entity in ATTACHED:
             p = self.parent(row)
             return p is not None and self.can_edit(row["entity"], p)
+        if entity == "contacts":
+            parents = self._contact_parents(row["id"])
+            if not parents:
+                return self.can_create_shared
+            return any(self.can_edit(e, r) for e, r in parents)
+        if entity == "tasks":
+            p = self.parent(row)
+            return self._task_mine(row) or (p is not None and self.can_edit(row["entity"], p))
         return False
 
     def can_delete(self, entity, row):
@@ -178,6 +214,14 @@ class Access:
         if entity in SHARED:
             links = self.links(entity, row)
             return self._shared_edit(links) and all(self.can_edit_fund(f) for f in links)
+        if entity == "contacts":
+            # Deleting a person removes them from every record they are linked to.
+            parents = self._contact_parents(row["id"])
+            return self.can_edit(entity, row) and all(self.can_edit(e, r) for e, r in parents)
+        if entity == "tasks":
+            p = self.parent(row)
+            return (row.get("created_by") == self.user["id"]
+                    or (p is not None and self.can_edit(row["entity"], p)))
         return self.can_edit(entity, row)
 
     def can_create(self, entity, row):
@@ -195,9 +239,17 @@ class Access:
         if entity == "companies":
             fid = row.get("fund_id")
             return self.can_edit_fund(fid) if fid is not None else self.can_create_shared
-        if entity == "activities":
+        if entity in ATTACHED:
             p = self.parent(row)
             return p is not None and self.can_edit(row["entity"], p)
+        if entity == "contacts":
+            return self.can_create_shared
+        if entity == "tasks":
+            # Anyone may track a to-do about a record they can see.
+            if row.get("entity") is None:
+                return True
+            p = self.parent(row)
+            return p is not None and self.can_view(row["entity"], p)
         return False
 
     def annotate(self, entity, row):

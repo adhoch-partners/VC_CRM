@@ -11,9 +11,10 @@ SEARCHABLE = {
     "companies": (["name", "sector", "founders", "website"], "name", ["deal_stage", "sector"]),
     "investors": (["name", "contact_name", "email", "location"], "name", ["investor_type", "location"]),
     "funds": (["name"], "name", ["status"]),
+    "contacts": (["name", "email", "title"], "name", ["title", "email"]),
 }
 # Record types whose names should not be duplicated.
-NAMED = {"lps", "companies", "investors", "funds"}
+NAMED = {"lps", "companies", "investors", "funds", "contacts"}
 
 LEGAL_SUFFIXES = {"inc", "incorporated", "llc", "ltd", "limited", "lp", "llp", "plc", "corp",
                   "corporation", "co", "company", "gmbh", "sa", "ag", "bv", "the"}

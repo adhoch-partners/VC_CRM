@@ -48,6 +48,14 @@ ROUND_INVESTOR_STAGES = [
 PARTICIPATION = ["Lead", "Co-lead", "Participant"]
 # Records an activity-log entry can be attached to.
 ACTIVITY_PARENTS = ["lps", "commitments", "companies", "funds", "investors", "rounds"]
+# Records people, documents and tasks can be attached to.
+CONTACT_PARENTS = ["lps", "investors", "companies"]
+DOC_PARENTS = ["lps", "commitments", "companies", "funds", "investors", "rounds", "capital_events"]
+TASK_PARENTS = ["lps", "commitments", "companies", "funds", "investors", "rounds"]
+DOC_TYPES = [
+    "Pitch deck", "Memo / IC memo", "Term sheet", "Financials", "Board materials", "LPA",
+    "Side letter", "Subscription docs", "Capital call notice", "Quarterly report", "Legal", "Other",
+]
 
 
 def f(name, label, type_="text", **kw):
@@ -226,6 +234,61 @@ ENTITIES = {
             f("owner", "Owner"),
             f("next_step", "Next step"),
             f("next_step_date", "Next step date", "date"),
+            f("notes", "Notes", "longtext"),
+        ],
+    },
+    "contacts": {
+        "label": "People",
+        "title": "name",
+        "order": "name",
+        "fields": [
+            f("name", "Name", required=True),
+            f("title", "Title"),
+            f("email", "Email"),
+            f("phone", "Phone"),
+            f("linkedin", "LinkedIn"),
+            f("location", "Location"),
+            f("notes", "Notes", "longtext"),
+        ],
+    },
+    "contact_links": {
+        "label": "Person links",
+        "title": "role",
+        "order": "id",
+        "fields": [
+            f("contact_id", "Person", "ref", ref="contacts", required=True),
+            f("entity", "Linked to (type)", "select", options=CONTACT_PARENTS, required=True),
+            f("entity_id", "Linked record", "integer", required=True),
+            f("role", "Role"),
+            f("is_primary", "Primary contact", "select", options=["Yes", "No"], default="No"),
+        ],
+    },
+    "documents": {
+        "label": "Documents",
+        "title": "title",
+        "order": "doc_date DESC NULLS LAST, id DESC",
+        "fields": [
+            f("entity", "Record type", "select", options=DOC_PARENTS, required=True),
+            f("entity_id", "Record", "integer", required=True),
+            f("title", "Title", required=True),
+            f("url", "Link (Drive, Dropbox, DocSend...)", required=True),
+            f("doc_type", "Type", "select", options=DOC_TYPES),
+            f("doc_date", "Date", "date"),
+            f("notes", "Notes", "longtext"),
+        ],
+    },
+    "tasks": {
+        "label": "Tasks",
+        "title": "title",
+        "order": "CASE WHEN status = 'Open' THEN 0 ELSE 1 END, due_date NULLS LAST, id",
+        "fields": [
+            f("title", "Task", required=True),
+            f("due_date", "Due", "date"),
+            f("assignee_id", "Assigned to", "ref", ref="users"),
+            f("status", "Status", "select", options=["Open", "Done"], default="Open"),
+            f("priority", "Priority", "select", options=["Normal", "High"], default="Normal"),
+            f("entity", "Related record type", "select", options=TASK_PARENTS),
+            f("entity_id", "Related record", "integer"),
             f("notes", "Notes", "longtext"),
         ],
     },

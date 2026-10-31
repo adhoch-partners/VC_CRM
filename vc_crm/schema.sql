@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
     totp_pending_secret TEXT,
     totp_enabled        INTEGER NOT NULL DEFAULT 0,
     totp_last_counter   INTEGER,
+    email_reminders     INTEGER NOT NULL DEFAULT 1,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -276,6 +277,61 @@ CREATE TABLE IF NOT EXISTS realizations (
     created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- ---------------------------------------------------------------- Relationships
+
+-- People, who can be linked to several LPs, investors and companies over time.
+CREATE TABLE IF NOT EXISTS contacts (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    title      TEXT,
+    email      TEXT,
+    phone      TEXT,
+    linkedin   TEXT,
+    location   TEXT,
+    notes      TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS contact_links (
+    id         INTEGER PRIMARY KEY,
+    contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    entity     TEXT NOT NULL,
+    entity_id  INTEGER NOT NULL,
+    role       TEXT,
+    is_primary TEXT NOT NULL DEFAULT 'No',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (contact_id, entity, entity_id)
+);
+
+-- Links to files kept in Google Drive, Dropbox, DocSend, etc.
+CREATE TABLE IF NOT EXISTS documents (
+    id         INTEGER PRIMARY KEY,
+    entity     TEXT NOT NULL,
+    entity_id  INTEGER NOT NULL,
+    title      TEXT NOT NULL,
+    url        TEXT NOT NULL,
+    doc_type   TEXT,
+    doc_date   TEXT,
+    notes      TEXT,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id           INTEGER PRIMARY KEY,
+    title        TEXT NOT NULL,
+    due_date     TEXT,
+    assignee_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    status       TEXT NOT NULL DEFAULT 'Open',
+    priority     TEXT NOT NULL DEFAULT 'Normal',
+    entity       TEXT,
+    entity_id    INTEGER,
+    notes        TEXT,
+    created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    completed_at TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ---------------------------------------------------------------- Shared
 
 CREATE TABLE IF NOT EXISTS activities (
@@ -301,3 +357,7 @@ CREATE INDEX IF NOT EXISTS idx_rounds_company ON rounds(company_id);
 CREATE INDEX IF NOT EXISTS idx_round_investors_round ON round_investors(round_id);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id);
 CREATE INDEX IF NOT EXISTS idx_audit_links ON audit_links(entity, entity_id);
+CREATE INDEX IF NOT EXISTS idx_contact_links_parent ON contact_links(entity, entity_id);
+CREATE INDEX IF NOT EXISTS idx_documents_parent ON documents(entity, entity_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(entity, entity_id);

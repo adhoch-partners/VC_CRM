@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import date, timedelta
 from types import SimpleNamespace
 from pathlib import Path
@@ -8,16 +9,14 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, mailer, metrics
+from . import auth, jobs, mailer, metrics
 from . import data_io, search, security
-from .access import LEVELS, Access, deny
+from .access import LEVELS, PARENTS, Access, deny
 from .db import Database, IntegrityError
 from .entities import CAPITAL_EVENT_FIELDS, DEAL_STAGES, ENTITIES, LP_STAGES
 
 STATIC = Path(__file__).with_name("static")
 
-# Records that own activity-log rows; deleting one also deletes its log.
-ACTIVITY_OWNERS = {"lps", "commitments", "companies", "funds", "investors", "rounds"}
 
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -94,6 +93,10 @@ def check_rules(conn, entity, row):
                            (row["round_id"],)).fetchone()
         if rnd and rnd["company_id"] != row["company_id"]:
             raise HTTPException(400, "The linked round belongs to a different company.")
+    if entity == "tasks" and (row.get("entity") is None) != (row.get("entity_id") is None):
+        raise HTTPException(400, "Choose both the related record type and the record, or neither.")
+    if entity == "documents" and not re.match(r"^https?://[^\s]+$", row.get("url") or ""):
+        raise HTTPException(400, "Document links must be web addresses starting with https://")
 
 
 # For each record type, the parent records whose history should include its changes.
@@ -112,9 +115,21 @@ def related(entity, row):
     if not row:
         return set()
     out = {(e, row.get(k)) for e, k in PARENT_KEYS.get(entity, []) if row.get(k) is not None}
-    if entity == "activities" and row.get("entity"):
+    if entity in ("activities", "documents", "tasks", "contact_links") and row.get("entity"):
         out.add((row["entity"], row.get("entity_id")))
+    if entity == "contact_links":
+        out.add(("contacts", row.get("contact_id")))
     return out
+
+
+def detach(conn, entity, ids_sql, args):
+    """Remove notes, document links and person links attached to records being deleted;
+    tasks about them are kept but no longer point at a record."""
+    for table in ("activities", "documents", "contact_links"):
+        conn.execute(f"DELETE FROM {table} WHERE entity = ? AND entity_id IN ({ids_sql})",
+                     (entity, *args))
+    conn.execute(f"UPDATE tasks SET entity = NULL, entity_id = NULL WHERE entity = ? "
+                 f"AND entity_id IN ({ids_sql})", (entity, *args))
 
 
 def audit(conn, user, action, entity, entity_id, changes=None, record=None, also=()):
@@ -151,7 +166,8 @@ def require_2fa(conn):
     return get_setting(conn, "require_2fa") == "1"
 
 
-def create_app(database_url=None, cookie_secure=None, session_days=None, send_email=None):
+def create_app(database_url=None, cookie_secure=None, session_days=None, send_email=None,
+               start_jobs=False):
     db = Database(database_url)
     db.init()
     cookie_secure = env_flag("COOKIE_SECURE") if cookie_secure is None else cookie_secure
@@ -159,6 +175,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
     throttle = auth.LoginThrottle()
     send_email = send_email or mailer.send
     bootstrap_admin(db)
+    if start_jobs:
+        jobs.start(db, send_email)
 
     app = FastAPI(title="VC CRM", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -233,6 +251,19 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
                             secure=cookie_secure, samesite="lax", path="/")
         return {**public_user(row), **Access(conn, row).summary()}
 
+    def notify_assignee(conn, task, actor):
+        """Email someone when a task is assigned to them by someone else (best effort)."""
+        if not task.get("assignee_id") or task["assignee_id"] == actor["id"]:
+            return
+        to = conn.execute("SELECT name, email, active FROM users WHERE id = ?",
+                          (task["assignee_id"],)).fetchone()
+        if not to or not to["active"]:
+            return
+        due = f"\nDue: {task['due_date']}" if task.get("due_date") else ""
+        send_email(to["email"], f"New task: {task['title']}", (
+            f"Hi {to['name']},\n\n{actor['name']} assigned you a task in VC CRM:\n\n"
+            f"{task['title']}{due}\n\nOpen your tasks: {mailer.app_url()}/#tasks"))
+
     # Shared helpers handed to the feature modules that register their own routes.
     deps = SimpleNamespace(
         get_conn=get_conn, viewer=viewer, admin=admin, get_access=get_access, fetch=fetch,
@@ -279,10 +310,21 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
             conn.execute("DELETE FROM sessions WHERE token_hash = ?", (auth.token_hash(token),))
         response.delete_cookie(auth.COOKIE, path="/")
 
+    @app.patch("/api/auth/preferences")
+    def preferences(data: dict = Body(...), user=Depends(viewer), conn=Depends(get_conn)):
+        if set(data) - {"email_reminders"}:
+            raise HTTPException(400, "Unknown preference")
+        conn.execute("UPDATE users SET email_reminders = ? WHERE id = ?",
+                     (1 if data.get("email_reminders") else 0, user["id"]))
+        return {"email_reminders": bool(data.get("email_reminders"))}
+
     @app.get("/api/auth/me")
     def me(acc=Depends(get_access), conn=Depends(get_conn)):
         required = require_2fa(conn)
+        prefs = conn.execute("SELECT email_reminders FROM users WHERE id = ?",
+                             (acc.user["id"],)).fetchone()
         return {**public_user(acc.user), **acc.summary(),
+                "email_reminders": bool(prefs["email_reminders"]) if prefs else True,
                 "totp_enabled": bool(acc.user["totp_enabled"]), "require_2fa": required,
                 "must_enroll_2fa": required and not acc.user["totp_enabled"]}
 
@@ -649,6 +691,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
         old = visible_event(conn, acc, eid)
         need_fund_edit(acc, old["fund_id"])
         with conn.transaction():
+            detach(conn, "capital_events", "?", (eid,))
             conn.execute("DELETE FROM capital_events WHERE id = ?", (eid,))
             audit(conn, acc.user, "delete", "capital_events", eid, old, record=old)
 
@@ -692,10 +735,13 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
     def create_row(entity: str, data: dict = Body(...), acc=Depends(get_access),
                    conn=Depends(get_conn)):
         row = coerce(entity_meta(entity)["fields"], data, partial=False)
-        if entity == "activities":
-            if not acc.parent(row):
-                raise HTTPException(400, "The record this activity belongs to does not exist")
+        if entity in ("activities", "documents", "contact_links", "tasks") \
+                and row.get("entity") is not None and not acc.parent(row):
+            raise HTTPException(400, "The record this is attached to does not exist")
+        if entity in ("activities", "documents", "tasks"):
             row["created_by"] = acc.user["id"]
+        if entity == "tasks" and row.get("status") == "Done":
+            row["completed_at"] = auth.iso(auth.utcnow())
         if not acc.can_create(entity, row):
             raise deny("Only admins can create funds." if entity == "funds" else
                        "You need editor access to this fund (or record) to add that.")
@@ -707,6 +753,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
         except IntegrityError as e:
             raise _integrity(e)
         acc.reset()
+        if entity == "tasks":
+            notify_assignee(conn, {**row, "id": rid}, acc.user)
         return acc.annotate(entity, fetch(conn, entity, rid))
 
     @app.patch("/api/{entity}/{rid}")
@@ -727,6 +775,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
                 raise deny("You need editor access to this company's current fund to change it.")
         if changed:
             check_rules(conn, entity, {**old, **changed})
+        if entity == "tasks" and "status" in changed:
+            changed["completed_at"] = auth.iso(auth.utcnow()) if changed["status"] == "Done" else None
         if changed:
             try:
                 with conn.transaction():
@@ -739,6 +789,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
             except IntegrityError as e:
                 raise _integrity(e)
             acc.reset()
+            if entity == "tasks" and "assignee_id" in changed:
+                notify_assignee(conn, {**old, **changed}, acc.user)
         return acc.annotate(entity, fetch(conn, entity, rid))
 
     @app.delete("/api/{entity}/{rid}", status_code=204)
@@ -752,17 +804,13 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
                        "You have view-only access to this record.")
         try:
             with conn.transaction():
-                if entity in ACTIVITY_OWNERS:
-                    conn.execute("DELETE FROM activities WHERE entity = ? AND entity_id = ?",
-                                 (entity, rid))
+                if entity in PARENTS:
+                    detach(conn, entity, "?", (rid,))
                     if entity == "lps":
-                        conn.execute(
-                            "DELETE FROM activities WHERE entity = 'commitments' AND entity_id "
-                            "IN (SELECT id FROM commitments WHERE lp_id = ?)", (rid,))
+                        detach(conn, "commitments",
+                               "SELECT id FROM commitments WHERE lp_id = ?", (rid,))
                     if entity == "companies":
-                        conn.execute(
-                            "DELETE FROM activities WHERE entity = 'rounds' AND entity_id "
-                            "IN (SELECT id FROM rounds WHERE company_id = ?)", (rid,))
+                        detach(conn, "rounds", "SELECT id FROM rounds WHERE company_id = ?", (rid,))
                 conn.execute(f"DELETE FROM {entity} WHERE id = ?", (rid,))
                 audit(conn, acc.user, "delete", entity, rid, old, record=old)
         except IntegrityError as e:
