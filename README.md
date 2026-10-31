@@ -255,6 +255,24 @@ LP sees its Fund II changes only). Deleted records keep their history on their p
 History cannot be edited or deleted from the app.
 Viewers see the same screens with editing turned off.
 
+## Import, export and search
+
+- **Export CSV** on the LP, pipeline, company, investor and round screens downloads the rows you
+  are allowed to see. Admins can download **Export everything (.zip)** from Admin > Users: every
+  record type, capital call allocations and the full change log (no passwords or secrets). Use
+  it as your own backup.
+- **Import** on the same screens takes a CSV (from Excel or Numbers: File > Export / Save As >
+  CSV). Headers must match the field names; each screen links to a template. Amounts in files
+  are **full dollars**. Linked records are matched by name ("Fund I", "Acme · Series A"), so load
+  LPs and companies before their commitments, investments and rounds. You see every row's
+  status first (ready, possible duplicate, error) and nothing is saved until you confirm.
+  Imported records appear in the change history as imports by you.
+- **Search** at the top of the sidebar (Cmd+K) finds LPs, companies, investors, funds and rounds
+  you can see.
+- **Duplicate warnings** appear while you type the name of a new LP, company, investor or fund
+  that looks like an existing one (ignoring case, punctuation and suffixes like Inc. or LLC). If
+  the match is in a fund you cannot see, the warning says so without revealing the name.
+
 ## Data model
 
 ```

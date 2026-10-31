@@ -166,6 +166,15 @@ input[type=password] { border: 1px solid var(--border); background: var(--surfac
 pre.codes { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
   font-size: 15px; line-height: 1.6; user-select: all; white-space: pre-wrap; word-break: break-all; }
 
+.search-box { position: relative; padding: 0 4px 6px; }
+#search-results { position: absolute; left: 4px; right: -220px; top: 38px; z-index: 30; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .15); max-height: 420px; overflow-y: auto; }
+#search-results .hit { padding: 8px 10px; cursor: pointer; }
+#search-results .hit.on, #search-results .hit:hover { background: var(--accent-soft); }
+#search-results .hit .muted { font-size: 12px; }
+.dup-warning { grid-column: 1 / -1; background: var(--accent-soft); border-radius: 6px; padding: 8px 10px; font-size: 13px; }
+a.btn { text-decoration: none; color: inherit; display: inline-block; }
+
 #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text);
   color: var(--bg); padding: 10px 16px; border-radius: 8px; z-index: 20; max-width: 90vw; }
 #toast.err { background: var(--bad); color: #fff; }

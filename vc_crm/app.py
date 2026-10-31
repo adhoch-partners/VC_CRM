@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, mailer, metrics
-from . import security
+from . import data_io, search, security
 from .access import LEVELS, Access, deny
 from .db import Database, IntegrityError
 from .entities import CAPITAL_EVENT_FIELDS, DEAL_STAGES, ENTITIES, LP_STAGES
@@ -657,6 +657,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
 
     deps.visible_row = lambda conn, acc, entity, rid: visible_row(conn, acc, entity, rid)
     security.register(app, deps)
+    search.register(app, deps)
+    data_io.register(app, deps)
 
     # ------------------------------------------------------------ generic CRUD
 

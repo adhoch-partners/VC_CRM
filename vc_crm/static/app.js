@@ -151,6 +151,88 @@ function fundFilter(onChange) {
   return sel;
 }
 
+/** A link that downloads the record type as CSV (only the rows you may see). */
+function exportButton(entity, label = "Export CSV", href = `/api/export/${entity}.csv`) {
+  const a = document.createElement("a");
+  a.className = "btn";
+  a.textContent = label;
+  a.href = href;
+  a.download = "";
+  return a;
+}
+
+/** Warn while typing a name that looks like an existing record (without naming hidden ones). */
+const DUP_ENTITIES = ["lps", "companies", "investors", "funds"];
+function watchDuplicates(input, entity, excludeId) {
+  const box = document.createElement("div");
+  box.className = "dup-warning";
+  box.hidden = true;
+  input.closest("label").after(box);
+  let timer;
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const name = input.value.trim();
+      if (name.length < 3) { box.hidden = true; return; }
+      const r = await api("GET", `/api/duplicates?entity=${entity}&name=${encodeURIComponent(name)}${excludeId ? `&exclude_id=${excludeId}` : ""}`).catch(() => null);
+      if (!r || (!r.visible.length && !r.hidden_count)) { box.hidden = true; return; }
+      box.innerHTML = r.visible.length
+        ? `Possible duplicate: ${r.visible.map((x) => `<span class="link" data-dup="${x.id}">${esc(x.name)}</span>`).join(", ")}. Open it instead of creating a new one?`
+        : "A record with a similar name exists in a fund you can't see. Ask an admin before creating a new one.";
+      box.hidden = false;
+    }, 350);
+  });
+  box.onclick = async (e) => {
+    const id = e.target.closest("[data-dup]")?.dataset.dup;
+    if (id) editRecord(entity, await api("GET", `/api/${entity}/${id}`));
+  };
+}
+
+/** Import a CSV: preview every row's status, then import. */
+function importDialog(entity, after) {
+  const label = S.meta.entities[entity]?.label ?? entity;
+  const d = openDrawer(`<h2>Import ${esc(label)}</h2>
+    <div class="muted" style="line-height:1.5">Upload a CSV (in Excel or Numbers: File &gt; Export / Save As &gt; CSV).
+      The first row must be column headers matching the field names; <a href="/api/import/${entity}/template.csv">download the template</a>.
+      <b>Amounts are full dollars</b> in files (5250000, not 5250). Linked records are matched by name
+      (e.g. Fund = "Fund I"), so import LPs and companies before their commitments and investments.</div>
+    <div style="margin:14px 0"><input type="file" accept=".csv,text/csv" data-file></div>
+    <div data-result></div>`);
+  let text = null;
+  const result = $("[data-result]", d);
+  const run = (body) => api("POST", `/api/import/${entity}`, { csv: text, ...body });
+  const show = (r) => {
+    const badge = { ok: "good", duplicate: "warn", error: "bad" };
+    result.innerHTML = `<div style="margin-bottom:8px"><b>${r.counts.ok}</b> ready ·
+        <b class="warn">${r.counts.duplicate}</b> possible duplicates · <b class="bad">${r.counts.error}</b> with errors
+        ${r.ignored_columns.length ? `<div class="muted">Ignored columns: ${r.ignored_columns.map(esc).join(", ")}</div>` : ""}</div>
+      <div class="grid-wrap" style="max-height:320px"><table class="grid"><thead><tr><th>Row</th><th>Record</th><th>Status</th></tr></thead>
+      <tbody>${r.rows.map((x) => `<tr><td><div class="cell">${x.row}</div></td><td><div class="cell">${esc(x.label ?? "")}</div></td>
+        <td><div class="cell ${badge[x.status]}" style="white-space:normal">${esc(x.status === "ok" ? "Ready" : x.message)}</div></td></tr>`).join("")}</tbody></table></div>
+      <div style="margin-top:12px; display:flex; flex-direction:column; gap:6px">
+        ${r.counts.duplicate ? '<label><input type="checkbox" data-incdup> Also import the possible duplicates</label>' : ""}
+        <div><button class="btn primary" data-go ${r.counts.ok + r.counts.duplicate ? "" : "disabled"}>Import
+          ${r.counts.error ? `the valid rows (skip ${r.counts.error} with errors)` : "rows"}</button>
+          <button class="btn" data-close>Cancel</button></div></div>`;
+    $("[data-close]", result).onclick = closeDrawer;
+    $("[data-go]", result).onclick = () => guard(async () => {
+      const incdup = $("[data-incdup]", result)?.checked ?? false;
+      const done = await run({ commit: true, skip_errors: true, skip_duplicates: !incdup });
+      toast(`Imported ${done.imported} record(s)`);
+      closeDrawer();
+      await loadLookups();
+      after?.();
+    });
+  };
+  $("[data-file]", d).onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => guard(async () => { text = reader.result; show(await run({})); });
+    reader.readAsText(file);
+  };
+}
+
 /** A button shown only when `allowed` (a placeholder node otherwise). */
 function buttonIf(allowed, ...args) {
   return allowed ? button(...args) : document.createComment("not permitted");
@@ -409,7 +491,9 @@ async function editRecord(entity, row, after, defaults = {}) {
     label.innerHTML = `${newRef.label}<input type="text" name="_new_ref" placeholder="Type to create a new ${newRef.what}">`;
     form.elements[newRef.field].closest("label").after(label);
     if (!Object.keys(S.look[newRef.entity]).length) form.elements._new_ref.focus();
+    if (DUP_ENTITIES.includes(newRef.entity)) watchDuplicates(form.elements._new_ref, newRef.entity);
   }
+  if (!ro && DUP_ENTITIES.includes(entity)) watchDuplicates(form.elements.name, entity, row?.id);
   $("[data-cancel]", d).onclick = closeDrawer;
   const save = $("[data-save]", d);
   if (save) save.onclick = () => guard(async () => {
@@ -748,6 +832,8 @@ VIEWS["lp-board"] = {
     actions.append(
       fundFilter(() => render()),
       segmented([["board", "Board"], ["grid", "Grid"]], mode, (m) => { pref("lpMode", m); render(); }),
+      exportButton("commitments"),
+      buttonIf(canEditSomeFund(), "Import", () => importDialog("commitments", render)),
       buttonIf(canEditSomeFund(), "+ Add LP to pipeline", () => editRecord("commitments", null, render, { fund_id: fund }), "primary"),
     );
     if (!Object.keys(S.look.funds).length) {
@@ -786,7 +872,8 @@ VIEWS["lp-board"] = {
 VIEWS.lps = {
   title: "LPs",
   async render(el, actions) {
-    actions.append(buttonIf(canCreateShared(), "+ New LP", () => editRecord("lps", null, render), "primary"));
+    actions.append(exportButton("lps"), buttonIf(canCreateShared(), "Import", () => importDialog("lps", render)),
+      buttonIf(canCreateShared(), "+ New LP", () => editRecord("lps", null, render), "primary"));
     const [rows, commits] = await Promise.all([api("GET", "/api/lps"), api("GET", "/api/commitments")]);
     const closed = {};
     for (const c of commits) if (c.stage === "Closed") closed[c.lp_id] = (closed[c.lp_id] || 0) + (c.committed_amount || 0);
@@ -806,6 +893,7 @@ VIEWS.funds = {
   title: "Funds & capital",
   async render(el, actions) {
     actions.append(
+      exportButton("capital_events", "Export capital calls"),
       buttonIf(isAdmin(), "+ New fund", () => editRecord("funds", null, render)),
       buttonIf(canEditSomeFund(), "+ Capital call / distribution", () => newCapitalEvent(render), "primary"),
     );
@@ -917,6 +1005,8 @@ VIEWS["deal-board"] = {
     const mode = pref("dealMode") ?? "board";
     actions.append(
       segmented([["board", "Board"], ["grid", "Grid"]], mode, (m) => { pref("dealMode", m); render(); }),
+      exportButton("companies"),
+      buttonIf(canCreateShared(), "Import", () => importDialog("companies", render)),
       buttonIf(canCreateShared(), "+ New deal", () => editRecord("companies", null, render), "primary"),
     );
     const rows = await api("GET", "/api/companies");
@@ -960,7 +1050,8 @@ const ROUND_STATUS_ORDER = ["Raising", "Planning", "Closed", "Abandoned"];
 VIEWS.rounds = {
   title: "Rounds",
   async render(el, actions) {
-    actions.append(buttonIf(canEditSomeFund(), "+ New round", () => editRecord("rounds", null, render), "primary"));
+    actions.append(exportButton("rounds"), buttonIf(canEditSomeFund(), "Import", () => importDialog("rounds", render)),
+      buttonIf(canEditSomeFund(), "+ New round", () => editRecord("rounds", null, render), "primary"));
     const [rounds, pipe, inv] = await Promise.all(["rounds", "round_investors", "investments"].map((e) => api("GET", `/api/${e}`)));
     const totals = roundTotals(pipe, inv);
     el.onclick = (e) => {
@@ -1047,7 +1138,8 @@ VIEWS["round-board"] = {
 VIEWS.investors = {
   title: "Investors",
   async render(el, actions) {
-    actions.append(buttonIf(canCreateShared(), "+ New investor", () => editRecord("investors", null, render), "primary"));
+    actions.append(exportButton("investors"), buttonIf(canCreateShared(), "Import", () => importDialog("investors", render)),
+      buttonIf(canCreateShared(), "+ New investor", () => editRecord("investors", null, render), "primary"));
     const [rows, pipe] = await Promise.all([api("GET", "/api/investors"), api("GET", "/api/round_investors")]);
     const active = {}, committed = {};
     for (const x of pipe) {
@@ -1068,7 +1160,9 @@ VIEWS.investors = {
 VIEWS.companies = {
   title: "All companies",
   async render(el, actions) {
-    actions.append(buttonIf(canCreateShared(), "+ New company", () => editRecord("companies", null, render), "primary"));
+    actions.append(exportButton("companies"), buttonIf(canCreateShared(), "Import", () => importDialog("companies", render)),
+      buttonIf(canEditSomeFund(), "Import investments", () => importDialog("investments", render)),
+      buttonIf(canCreateShared(), "+ New company", () => editRecord("companies", null, render), "primary"));
     renderGrid(el, {
       entity: "companies", rows: await api("GET", "/api/companies"),
       cols: ["name", "deal_stage", "sector", "company_stage", "location", "founders", "website", "source", "deal_owner", "fund_id"],
@@ -1131,7 +1225,7 @@ VIEWS.users = {
       toast(on ? "Two-factor is now required" : "Two-factor is now optional");
       if (on && !S.me.totp_enabled) showEnroll();
     });
-    actions.append(req, button("+ Invite user", () => newUser(render), "primary"));
+    actions.append(req, exportButton("all", "Export everything (.zip)", "/api/export/all.zip"), button("+ Invite user", () => newUser(render), "primary"));
     el.innerHTML = `<div class="panel muted" style="line-height:1.6">
       <b>Admins</b> see and edit every fund and manage users.<br>
       <b>Everyone else</b> sees only the funds they are given: <b>Viewer</b> (read-only) or <b>Editor</b> per fund.
@@ -1440,6 +1534,45 @@ async function showSecurity() {
     }
   };
 }
+
+/** Sidebar search across LPs, companies, investors, funds and rounds (Cmd+K / Ctrl+K). */
+function setupSearch() {
+  const input = $("#search"), out = $("#search-results");
+  let timer, hits = [], active = -1;
+  const draw = () => {
+    out.hidden = !hits.length && !input.value.trim();
+    out.innerHTML = hits.length ? hits.map((h, i) => `<div class="hit ${i === active ? "on" : ""}" data-i="${i}">
+        <div>${esc(h.title)}</div><div class="muted">${esc(ENTITY_NOUN[h.entity] ?? h.entity)}${h.subtitle ? ` · ${esc(h.subtitle)}` : ""}</div></div>`).join("")
+      : input.value.trim().length >= 2 ? '<div class="muted" style="padding:8px">No matches</div>' : "";
+  };
+  const open = async (h) => {
+    input.value = ""; hits = []; draw(); input.blur();
+    editRecord(h.entity, await api("GET", `/api/${h.entity}/${h.id}`), () => render());
+  };
+  input.oninput = () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const q = input.value.trim();
+      hits = q.length >= 2 ? await api("GET", `/api/search?q=${encodeURIComponent(q)}`).catch(() => []) : [];
+      active = hits.length ? 0 : -1;
+      draw();
+    }, 200);
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      active = Math.max(0, Math.min(hits.length - 1, active + (e.key === "ArrowDown" ? 1 : -1)));
+      draw();
+    } else if (e.key === "Enter" && hits[active]) open(hits[active]);
+    else if (e.key === "Escape") { input.value = ""; hits = []; draw(); input.blur(); }
+  };
+  out.onmousedown = (e) => { const i = e.target.closest("[data-i]")?.dataset.i; if (i != null) open(hits[i]); };
+  input.onblur = () => setTimeout(() => (out.hidden = true), 150);
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && S.me) { e.preventDefault(); input.focus(); }
+  });
+}
+setupSearch();
 
 function renderMe() {
   $("#me").innerHTML = `<div class="who">${esc(S.me.name)}</div><div class="muted">${esc(S.me.email)} · ${esc(S.me.role)}</div>
