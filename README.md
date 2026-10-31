@@ -255,6 +255,28 @@ LP sees its Fund II changes only). Deleted records keep their history on their p
 History cannot be edited or deleted from the app.
 Viewers see the same screens with editing turned off.
 
+## KPIs, analytics, saved views and custom fields
+
+- **Portfolio KPIs:** on a company's **KPIs** tab, record each period's revenue, ARR, gross
+  margin, net monthly burn, cash, headcount and customers. The tab shows the latest values with
+  trend lines and change vs the prior period, plus runway (cash ÷ burn). The Portfolio screen
+  adds latest ARR, runway (amber under 12 months, red under 6) and the KPI date. KPIs follow the
+  company's fund access; fund editors add them. They can also be imported from CSV.
+- **Pipeline analytics** (sidebar > Analytics) for the LP or deal pipeline, all funds or one:
+  how many reached each stage, conversion to the next stage, median days spent in each stage,
+  how many sit there now and for how long, where things were lost, win rate, median time to
+  close, and (deals) pass reasons. It is rebuilt from the change history, so it starts counting
+  from when stage changes were first recorded.
+- **Filters and saved views:** every main list has **+ Filter** (choice fields match exactly,
+  text fields "contains"). The **Views** menu at the top of a screen saves the current search,
+  sort, filters and screen settings (fund, board/grid, tab) under a name, either just for you or
+  shared with everyone, and switches between them.
+- **Custom fields** (Admin > Custom fields): add text, long text, number, amount, percent, date
+  or choice-list fields to LPs, companies, investors, people, LP pipeline entries, funds and
+  rounds. They appear in forms, as list columns, in filters and saved views, in CSV
+  import/export and in the change history. The type is fixed once created; name and choices can
+  change. Removing a field hides it and keeps its values.
+
 ## People, documents and tasks
 
 - **People** (sidebar > People) are individuals you work with. One person can be linked to

@@ -52,12 +52,12 @@ const fmt = {
     // Switch to M once the K figure would round to 1,000K (e.g. $999,999 shows as $1M).
     return Math.round(a / 100) >= 10000 ? `${sign}$${num(a / 1e6, 2)}M` : `${sign}$${num(a / 1e3, 1)}K`;
   },
-  pct: (v, digits = 1) => (v == null ? "n/a" : `${(v * 100).toFixed(digits)}%`),
+  pct: (v, digits = 1) => (v == null ? "n/a" : `${(v * 100 + 0).toFixed(digits).replace(/^-(0\.?0*)$/, "$1")}%`),
   multiple: (v) => (v == null ? "n/a" : `${v.toFixed(2)}x`),
   num: (v) => (v == null || v === "" ? "" : Number(v).toLocaleString()),
 };
 
-const S = { meta: null, me: null, people: {}, look: { funds: {}, lps: {}, companies: {}, investors: {}, rounds: {}, users: {}, contacts: {} }, view: null, prefs: {} };
+const S = { meta: null, me: null, people: {}, gridState: {}, activeView: {}, look: { funds: {}, lps: {}, companies: {}, investors: {}, rounds: {}, users: {}, contacts: {} }, view: null, prefs: {} };
 const isAdmin = () => Boolean(S.me?.admin);
 // Per-record rights come from the server as _can_edit / _can_delete on each row.
 // These only decide which "create" buttons to offer.
@@ -271,8 +271,15 @@ function segmented(options, current, onChange) {
  * cols: [{ name, label?, field?, value?(row) -> html, editable?, num?, total?(rows) }]
  * Columns backed by an entity field are inline-editable; click a cell to edit.
  */
-function renderGrid(el, { entity, rows, cols, onOpen, onChanged, search = true }) {
-  const state = { sort: null, dir: 1, q: "" };
+function renderGrid(el, { entity, rows, cols, onOpen, onChanged, search = true, persist = null }) {
+  // A main list (persist = its view name) remembers search, sort and filters, which is
+  // also what a saved view stores; it also shows the record type's custom fields.
+  const saved = persist ? (S.gridState[persist] ??= { sort: null, dir: 1, q: "", filters: [] }) : null;
+  const state = saved ?? { sort: null, dir: 1, q: "", filters: [] };
+  if (persist && entity && S.meta.customizable?.includes(entity)) {
+    const have = new Set(cols.map((c) => (typeof c === "string" ? c : c.name)));
+    cols = [...cols, ...fieldsOf(entity).filter((f) => f.custom && f.type !== "longtext" && !have.has(f.name)).map((f) => f.name)];
+  }
   const colDefs = cols.map((c) => {
     const f = typeof c === "string" ? fieldOf(entity, c) : c.field ?? (entity && fieldOf(entity, c.name));
     const base = typeof c === "string" ? { name: c } : c;
@@ -285,10 +292,50 @@ function renderGrid(el, { entity, rows, cols, onOpen, onChanged, search = true }
     };
   });
 
-  el.innerHTML = `${search ? '<div style="margin-bottom:10px"><input type="search" placeholder="Search..." style="max-width:280px"></div>' : ""}
+  const filterable = entity ? fieldsOf(entity).filter((f) => ["select", "ref", "text"].includes(f.type)) : [];
+  el.innerHTML = `${search ? `<div class="grid-tools"><input type="search" placeholder="Search..." style="max-width:280px" value="${esc(state.q)}">
+      ${filterable.length ? '<span data-chips></span><button type="button" class="btn small" data-addf>+ Filter</button>' : ""}</div>` : ""}
     <div class="grid-wrap"><table class="grid"><thead></thead><tbody></tbody><tfoot></tfoot></table></div>`;
   const q = $("input[type=search]", el);
   if (q) q.oninput = () => { state.q = q.value.toLowerCase(); draw(); };
+
+  const fieldNamed = (n) => filterable.find((f) => f.name === n);
+  const drawChips = () => {
+    const chips = $("[data-chips]", el);
+    if (!chips) return;
+    chips.innerHTML = state.filters.map(([n, v], i) => {
+      const f = fieldNamed(n);
+      const shown = f?.type === "ref" ? refLabel(f.ref, v) : v;
+      return `<span class="chip">${esc(f?.label ?? n)}${f?.type === "text" ? " contains" : ":"} ${esc(shown)}
+        <span class="link" data-rmf="${i}">×</span></span>`;
+    }).join("");
+  };
+  const tools = $(".grid-tools", el);
+  if (tools) tools.onclick = (e) => {
+    const rm = e.target.closest("[data-rmf]");
+    if (rm) { state.filters.splice(Number(rm.dataset.rmf), 1); drawChips(); draw(); return; }
+    if (!e.target.closest("[data-addf]") || $(".filter-add", el)) return;
+    const box = document.createElement("span");
+    box.className = "filter-add";
+    box.innerHTML = `<select data-ff>${filterable.map((f) => `<option value="${f.name}">${esc(f.label)}</option>`).join("")}</select>
+      <span data-fv></span> <button type="button" class="btn small" data-ok>Add</button>`;
+    tools.append(box);
+    const fv = $("[data-fv]", box), ff = $("[data-ff]", box);
+    const valueInput = () => {
+      const f = fieldNamed(ff.value);
+      fv.innerHTML = f.type === "text" ? '<input type="text" placeholder="contains...">' : input(f, "");
+    };
+    ff.onchange = valueInput;
+    valueInput();
+    $("[data-ok]", box).onclick = () => {
+      const v = $("input,select", fv).value.trim();
+      if (v) state.filters.push([ff.value, v]);
+      box.remove();
+      drawChips();
+      draw();
+    };
+  };
+  drawChips();
 
   const cellHtml = (c, r) => (c.value ? c.value(r) : display(c.field, r[c.name]));
   const sortVal = (c, r) => {
@@ -299,8 +346,15 @@ function renderGrid(el, { entity, rows, cols, onOpen, onChanged, search = true }
 
   function draw() {
     let list = rows;
+    for (const [n, v] of state.filters) {
+      const f = fieldNamed(n);
+      if (!f) continue; // e.g. a filter on a custom field that was removed
+      list = f.type === "text"
+        ? list.filter((r) => String(r[n] ?? "").toLowerCase().includes(v.toLowerCase()))
+        : list.filter((r) => String(r[n] ?? "") === String(v));
+    }
     if (state.q) {
-      list = rows.filter((r) => colDefs.some((c) =>
+      list = list.filter((r) => colDefs.some((c) =>
         String(cellHtml(c, r) ?? "").replace(/<[^>]+>/g, "").toLowerCase().includes(state.q)));
     }
     if (state.sort) {
@@ -910,16 +964,21 @@ async function lpExtras(el, lp, after) {
 async function companyExtras(el, co, after) {
   const box = document.createElement("div");
   el.append(box);
-  const tabs = [["investments", "Investments"], ["valuations", "Valuations"], ["realizations", "Realizations"], ["rounds", "Rounds"]];
+  const tabs = [["company_metrics", "KPIs"], ["investments", "Investments"], ["valuations", "Valuations"],
+    ["realizations", "Realizations"], ["rounds", "Rounds"]];
+  const noun = { company_metrics: "KPI period", investments: "investment", valuations: "valuation",
+    realizations: "realization", rounds: "round" };
   let cur = "investments";
   const draw = async () => {
     const rows = await api("GET", `/api/${cur}?company_id=${co.id}`);
     box.innerHTML = `<div class="tabs">${tabs.map(([k, l]) => `<button data-t="${k}" class="${k === cur ? "on" : ""}">${l}</button>`).join("")}</div>
-      <div style="margin:10px 0" ${canEditSomeFund() ? "" : "hidden"}><button class="btn small" data-add>+ Add ${cur.replace(/s$/, "")}</button></div><div data-g></div>`;
+      ${cur === "company_metrics" ? kpiSummary(rows) : ""}
+      <div style="margin:10px 0" ${canEditSomeFund() ? "" : "hidden"}><button class="btn small" data-add>+ Add ${noun[cur]}</button></div><div data-g></div>`;
     box.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { cur = b.dataset.t; draw(); }));
     const defaults = { company_id: co.id, fund_id: co.fund_id ?? "" };
     const dateField = { investments: "investment_date", valuations: "valuation_date", realizations: "realization_date" }[cur];
     if (dateField) defaults[dateField] = today();
+    if (cur === "company_metrics") defaults.period_end = lastMonthEnd();
     $("[data-add]", box).onclick = () => editRecord(cur, null, () => { after?.(); }, defaults);
     renderGrid($("[data-g]", box), {
       entity: cur, rows, search: false,
@@ -929,6 +988,42 @@ async function companyExtras(el, co, after) {
     });
   };
   await draw();
+}
+
+function lastMonthEnd() {
+  const d = new Date();
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), 0)).toISOString().slice(0, 10);
+}
+
+const runway = (k) => (k?.cash != null && k?.burn > 0 ? k.cash / k.burn : null);
+
+/** Small trend charts of the latest KPIs for a company (rows: company_metrics, any order). */
+function kpiSummary(rows) {
+  if (!rows.length) return '<div class="muted" style="margin:10px 0">No KPIs yet. Add a period with revenue, ARR, burn, cash and headcount to see trends here.</div>';
+  const series = [...rows].sort((a, b) => a.period_end.localeCompare(b.period_end));
+  const last = series[series.length - 1];
+  const tiles = [["arr", "ARR", fmt.money], ["revenue", "Revenue", fmt.money], ["burn", "Net burn / mo", fmt.money],
+    ["cash", "Cash", fmt.money], ["headcount", "Headcount", fmt.num]]
+    .filter(([k]) => series.some((r) => r[k] != null))
+    .map(([k, label, f]) => {
+      const pts = series.filter((r) => r[k] != null);
+      const latest = pts[pts.length - 1][k], prev = pts.length > 1 ? pts[pts.length - 2][k] : null;
+      const change = prev ? (latest - prev) / Math.abs(prev) : null;
+      return `<div class="kpi"><div class="label">${label}</div><div class="value">${f(latest)}</div>
+        <div class="sub">${change == null ? "&nbsp;" : `${change >= 0 ? "+" : ""}${(change * 100).toFixed(0)}% vs prior period`}</div>
+        ${sparkline(pts.map((r) => r[k]))}</div>`;
+    }).join("");
+  const rw = runway(last);
+  return `<div class="muted" style="margin-top:10px">Latest period ${esc(last.period_end)}${rw != null ? ` · runway <b>${rw.toFixed(1)} months</b> at current burn` : ""}</div>
+    <div class="kpis kpis-small">${tiles}</div>`;
+}
+
+function sparkline(values, w = 140, h = 36) {
+  if (values.length < 2) return "";
+  const min = Math.min(...values), max = Math.max(...values), span = max - min || 1;
+  const pts = values.map((v, i) => `${(i / (values.length - 1)) * w},${h - 3 - ((v - min) / span) * (h - 6)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="none" aria-hidden="true">
+    <polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
 function roundExtras(el, rnd) {
@@ -957,6 +1052,7 @@ const VIEWS = {};
 
 VIEWS.dashboard = {
   title: "Dashboard",
+  noSavedViews: true,
   async render(el) {
     const [d, rounds, pipe, inv] = await Promise.all([api("GET", "/api/dashboard"),
       api("GET", "/api/rounds"), api("GET", "/api/round_investors"), api("GET", "/api/investments")]);
@@ -1065,7 +1161,7 @@ VIEWS["lp-board"] = {
           ${r.next_step ? `<div class="meta ${dueClass(r.next_step_date)}">${esc(r.next_step)}${r.next_step_date ? ` · ${esc(r.next_step_date)}` : ""}</div>` : ""}`,
       });
     } else {
-      renderGrid(el, {
+      renderGrid(el, { persist: S.view,
         entity: "commitments", rows,
         cols: ["lp_id", "fund_id", "stage", "target_amount", "committed_amount", "close_date", "owner", "next_step", "next_step_date"]
           .map((n) => (["target_amount", "committed_amount"].includes(n)
@@ -1084,7 +1180,7 @@ VIEWS.lps = {
     const [rows, commits] = await Promise.all([api("GET", "/api/lps"), api("GET", "/api/commitments")]);
     const closed = {};
     for (const c of commits) if (c.stage === "Closed") closed[c.lp_id] = (closed[c.lp_id] || 0) + (c.committed_amount || 0);
-    renderGrid(el, {
+    renderGrid(el, { persist: S.view,
       entity: "lps", rows,
       cols: ["name", "lp_type", "contact_name", "email", "phone", "location", "relationship_owner", "tags",
         { name: "total_committed", label: "Total committed", num: true, editable: false,
@@ -1098,6 +1194,7 @@ VIEWS.lps = {
 
 VIEWS.funds = {
   title: "Funds & capital",
+  noSavedViews: true,
   async render(el, actions) {
     actions.append(
       exportButton("capital_events", "Export capital calls"),
@@ -1234,7 +1331,7 @@ VIEWS["deal-board"] = {
           ${r.next_step ? `<div class="meta ${dueClass(r.next_step_date)}">${esc(r.next_step)}${r.next_step_date ? ` · ${esc(r.next_step_date)}` : ""}</div>` : ""}`,
       });
     } else {
-      renderGrid(el, {
+      renderGrid(el, { persist: S.view,
         entity: "companies", rows,
         cols: ["name", "deal_stage", "sector", "company_stage", "deal_owner", "fund_id", "round_size", "proposed_check",
           "pre_money", "source", "next_step", "next_step_date", "pass_reason"],
@@ -1266,7 +1363,7 @@ VIEWS.rounds = {
       const x = e.target.closest("[data-pipe]");
       if (x) { pref("round", Number(x.dataset.pipe)); go("round-board"); }
     };
-    renderGrid(el, {
+    renderGrid(el, { persist: S.view,
       entity: "rounds", rows: rounds,
       cols: ["company_id", "round_name", "status", "target_size",
         { name: "committed", label: "Committed (incl. ours)", num: true, editable: false,
@@ -1332,7 +1429,7 @@ VIEWS["round-board"] = {
           ${r.next_step ? `<div class="meta ${dueClass(r.next_step_date)}">${esc(r.next_step)}${r.next_step_date ? ` · ${esc(r.next_step_date)}` : ""}</div>` : ""}`,
       });
     } else {
-      renderGrid(target, {
+      renderGrid(target, { persist: S.view,
         entity: "round_investors", rows,
         cols: ["investor_id", "stage", "participation",
           { name: "amount", total: (l) => fmt.money(l.reduce((s, r) => s + (r.amount || 0), 0)) },
@@ -1354,7 +1451,7 @@ VIEWS.investors = {
       if (x.stage === "Committed") committed[x.investor_id] = (committed[x.investor_id] || 0) + 1;
       else if (x.stage !== "Passed") active[x.investor_id] = (active[x.investor_id] || 0) + 1;
     }
-    renderGrid(el, {
+    renderGrid(el, { persist: S.view,
       entity: "investors", rows,
       cols: ["name", "investor_type", "contact_name", "email", "location", "stage_focus", "check_size_min", "check_size_max",
         { name: "active", label: "Active in rounds", num: true, editable: false, value: (r) => active[r.id] || "", sortValue: (r) => active[r.id] || 0 },
@@ -1394,7 +1491,7 @@ VIEWS.tasks = {
       const t = e.target.closest("[data-rec]");
       if (t) { const [en, id] = t.dataset.rec.split(":"); openRecord(en, id, render); }
     };
-    renderGrid(el, {
+    renderGrid(el, { persist: S.view,
       entity: "tasks", rows,
       cols: [
         { name: "done", label: "", editable: false, value: (r) => `<input type="checkbox" data-done="${r.id}" ${r.status === "Done" ? "checked" : ""} ${r._can_edit ? "" : "disabled"}>` },
@@ -1419,7 +1516,7 @@ VIEWS.people = {
     const [rows, links] = await Promise.all([api("GET", "/api/contacts"), api("GET", "/api/contact_links")]);
     const linked = {};
     for (const l of links) (linked[l.contact_id] ??= []).push(refLabel(l.entity, l.entity_id) + (l.role ? ` (${l.role})` : ""));
-    renderGrid(el, {
+    renderGrid(el, { persist: S.view,
       entity: "contacts", rows,
       cols: ["name", "title", "email", "phone", "location",
         { name: "linked", label: "Linked to", editable: false, value: (r) => esc((linked[r.id] || []).join("; ")),
@@ -1430,13 +1527,110 @@ VIEWS.people = {
   },
 };
 
+VIEWS.analytics = {
+  title: "Pipeline analytics",
+  noSavedViews: true,
+  async render(el, actions) {
+    const kind = pref("anKind") ?? "lp";
+    actions.append(segmented([["lp", "LP pipeline"], ["deal", "Deal pipeline"]], kind, (k) => { pref("anKind", k); render(); }),
+      fundFilter(() => render()));
+    const fund = pref("fund") ?? "";
+    const a = await api("GET", `/api/analytics/pipeline?kind=${kind}${fund ? `&fund_id=${fund}` : ""}`);
+    const top = Math.max(1, ...a.stages.map((s) => s.reached));
+    const won = kind === "lp" ? "Closed" : "Invested", lost = kind === "lp" ? "Declined" : "Passed";
+    el.innerHTML = `<div class="kpis">
+        <div class="kpi"><div class="label">${kind === "lp" ? "LP pipeline entries" : "Deals"}</div><div class="value">${a.total}</div></div>
+        <div class="kpi"><div class="label">${won}</div><div class="value">${a.won}</div></div>
+        <div class="kpi"><div class="label">${lost}</div><div class="value">${a.lost}</div></div>
+        <div class="kpi"><div class="label">Win rate</div><div class="value">${fmt.pct(a.win_rate, 0)}</div><div class="sub">${won} ÷ (${won} + ${lost})</div></div>
+        <div class="kpi"><div class="label">Median days to ${won.toLowerCase()}</div><div class="value">${a.median_days_to_win ?? "n/a"}</div></div>
+      </div>
+      <div class="panel"><h2>Funnel</h2>${a.stages.map((s) => `
+        <div class="funnel-row"><div class="funnel-label">${esc(s.stage)}</div>
+          <div class="funnel-bar"><div style="width:${(s.reached / top) * 100}%"></div></div>
+          <div class="funnel-num">${s.reached}</div>
+          <div class="funnel-conv muted">${s.conversion_to_next == null ? "" : `${fmt.pct(s.conversion_to_next, 0)} move on`}</div></div>`).join("")}
+        <div class="muted" style="margin-top:8px">"Reached" counts everything that ever got to a stage or further, rebuilt from the change history.</div></div>
+      <div class="panel"><h2>Time in stage</h2><div data-g></div></div>
+      ${a.pass_reasons ? `<div class="panel"><h2>Why we passed</h2>${a.pass_reasons.map(([r, n]) =>
+        `<div style="display:flex;justify-content:space-between;padding:3px 0"><span>${esc(r)}</span><b>${n}</b></div>`).join("") || '<div class="muted">No passed deals yet.</div>'}</div>` : ""}`;
+    renderGrid($("[data-g]", el), {
+      rows: a.stages.map((s, i) => ({ ...s, id: i })), search: false,
+      cols: [
+        { name: "stage", label: "Stage", value: (r) => esc(r.stage) },
+        { name: "median_days", label: "Median days in stage", num: true, value: (r) => r.median_days ?? "" },
+        { name: "completed_stays", label: "Moved on (count)", num: true, value: (r) => r.completed_stays },
+        { name: "current", label: "There now", num: true, value: (r) => r.current },
+        { name: "current_median_age", label: "Median days there now", num: true,
+          value: (r) => (r.current_median_age == null ? "" : `<span class="${r.current_median_age > 60 ? "warn" : ""}">${r.current_median_age}</span>`) },
+        { name: "lost_here", label: `${lost} from here`, num: true, value: (r) => r.lost_here || "" },
+      ],
+    });
+  },
+};
+
+VIEWS["custom-fields"] = {
+  title: "Custom fields",
+  noSavedViews: true,
+  async render(el, actions) {
+    const defs = await api("GET", "/api/custom-fields");
+    const kinds = { lps: "LPs", companies: "Companies", investors: "Investors", contacts: "People",
+      commitments: "LP pipeline entries", funds: "Funds", rounds: "Rounds" };
+    actions.append(button("+ New field", () => newCustomField(kinds, render), "primary"));
+    el.innerHTML = `<div class="panel muted">Add your own fields to records. They appear in forms, as list columns,
+      in filters, saved views, CSV import/export and the change history. Removing a field hides it; its values are kept
+      and come back if you add a field with the same name again.</div>
+      ${Object.entries(kinds).map(([k, label]) => `<div class="panel"><h2>${label}</h2>${defs.filter((d) => d.entity === k).map((d) => `
+        <div class="activity"><b>${esc(d.label)}</b> <span class="muted">${esc(S.meta.custom_types[d.field_type])}${d.options ? `: ${esc(d.options.join(", "))}` : ""}</span>
+          <span style="float:right"><span class="link" data-rename="${d.id}">Rename</span>${d.field_type === "select" ? ` · <span class="link" data-choices="${d.id}">Edit choices</span>` : ""}
+          · <span class="link" data-remove="${d.id}">Remove</span></span></div>`).join("") || '<div class="muted">No custom fields.</div>'}</div>`).join("")}`;
+    el.onclick = (e) => {
+      const t = e.target.closest("[data-rename],[data-choices],[data-remove]");
+      if (!t) return;
+      const def = defs.find((x) => String(x.id) === (t.dataset.rename ?? t.dataset.choices ?? t.dataset.remove));
+      const done = async (body) => { await api("PATCH", `/api/custom-fields/${def.id}`, body); S.meta = await api("GET", "/api/meta"); render(); };
+      if (t.dataset.rename) {
+        const label = prompt("New name:", def.label);
+        if (label) guard(() => done({ label }));
+      } else if (t.dataset.choices) {
+        const opts = prompt("Choices, separated by commas (existing values are kept even if removed from the list):", def.options.join(", "));
+        if (opts) guard(() => done({ options: opts }));
+      } else if (confirm(`Remove "${def.label}"? It disappears from the app; its values are kept.`)) {
+        guard(async () => { await api("DELETE", `/api/custom-fields/${def.id}`); S.meta = await api("GET", "/api/meta"); render(); });
+      }
+    };
+  },
+};
+
+function newCustomField(kinds, after) {
+  const d = openDrawer(`<h2>New custom field</h2>
+    <form class="form">
+      <label>Add to<select name="entity">${Object.entries(kinds).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></label>
+      <label>Field name<input type="text" name="label" placeholder="e.g. Tier, AUM, Board seat"></label>
+      <label>Type<select name="field_type">${Object.entries(S.meta.custom_types).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></label>
+      <label data-opts hidden>Choices (comma separated)<input type="text" name="options" placeholder="e.g. A, B, C"></label>
+    </form>
+    <div class="drawer-actions"><div><button class="btn primary" data-save>Create field</button> <button class="btn" data-cancel>Cancel</button></div></div>`);
+  const f = $("form", d);
+  f.field_type.onchange = () => ($("[data-opts]", d).hidden = f.field_type.value !== "select");
+  $("[data-cancel]", d).onclick = closeDrawer;
+  $("[data-save]", d).onclick = () => guard(async () => {
+    await api("POST", "/api/custom-fields", { entity: f.entity.value, label: f.elements.label.value,
+      field_type: f.field_type.value, options: f.field_type.value === "select" ? f.options.value : undefined });
+    S.meta = await api("GET", "/api/meta");
+    closeDrawer();
+    toast("Field added");
+    after();
+  });
+}
+
 VIEWS.companies = {
   title: "All companies",
   async render(el, actions) {
     actions.append(exportButton("companies"), buttonIf(canCreateShared(), "Import", () => importDialog("companies", render)),
       buttonIf(canEditSomeFund(), "Import investments", () => importDialog("investments", render)),
       buttonIf(canCreateShared(), "+ New company", () => editRecord("companies", null, render), "primary"));
-    renderGrid(el, {
+    renderGrid(el, { persist: S.view,
       entity: "companies", rows: await api("GET", "/api/companies"),
       cols: ["name", "deal_stage", "sector", "company_stage", "location", "founders", "website", "source", "deal_owner", "fund_id"],
       onOpen: (r) => editRecord("companies", r, render),
@@ -1450,7 +1644,10 @@ VIEWS.portfolio = {
   async render(el, actions) {
     actions.append(fundFilter(() => render()));
     const fund = pref("fund") ?? "";
-    const { holdings, totals: t } = await api("GET", `/api/portfolio${fund ? `?fund_id=${fund}` : ""}`);
+    const [{ holdings, totals: t }, kpis] = await Promise.all([api("GET", `/api/portfolio${fund ? `?fund_id=${fund}` : ""}`),
+      api("GET", "/api/company_metrics")]);
+    const latest = {};
+    for (const k of kpis) if (!latest[k.company_id] || k.period_end > latest[k.company_id].period_end) latest[k.company_id] = k;
     el.innerHTML = `<div class="kpis">
         <div class="kpi"><div class="label">Invested</div><div class="value">${fmt.money(t.invested)}</div><div class="sub">${t.active} active / ${t.positions} positions</div></div>
         <div class="kpi"><div class="label">Realized</div><div class="value">${fmt.money(t.realized)}</div></div>
@@ -1462,7 +1659,7 @@ VIEWS.portfolio = {
         Add investments, marks and exits from a company's record.</div><div data-g></div>`;
     const m = (name, label, f = fmt.money, total = true) => ({ name, label, num: true, value: (r) => f(r[name]),
       total: total ? (l) => f(l.reduce((s, r) => s + (r[name] || 0), 0)) : undefined });
-    renderGrid($("[data-g]", el), {
+    renderGrid($("[data-g]", el), { persist: S.view,
       rows: holdings.map((h) => ({ ...h, id: `${h.company_id}-${h.fund_id}` })),
       cols: [
         { name: "company", label: "Company", value: (r) => esc(r.company) },
@@ -1474,6 +1671,10 @@ VIEWS.portfolio = {
         { name: "moic", label: "MOIC", num: true, value: (r) => `<span class="${r.moic >= 1 ? "good" : r.moic != null ? "bad" : ""}">${fmt.multiple(r.moic)}</span>` },
         { name: "irr", label: "IRR", num: true, value: (r) => fmt.pct(r.irr) },
         { name: "valuation_basis", label: "Valuation basis", value: (r) => esc(r.valuation_basis) },
+        { name: "arr", label: "Latest ARR", num: true, value: (r) => fmt.money(latest[r.company_id]?.arr), sortValue: (r) => latest[r.company_id]?.arr },
+        { name: "runway", label: "Runway (mo)", num: true, sortValue: (r) => runway(latest[r.company_id]),
+          value: (r) => { const m = runway(latest[r.company_id]); return m == null ? "" : `<span class="${m < 6 ? "bad" : m < 12 ? "warn" : ""}">${m.toFixed(1)}</span>`; } },
+        { name: "kpi_date", label: "KPIs as of", value: (r) => esc(latest[r.company_id]?.period_end ?? "") },
       ],
       onOpen: async (r) => editRecord("companies", await api("GET", `/api/companies/${r.company_id}`), render),
     });
@@ -1482,6 +1683,7 @@ VIEWS.portfolio = {
 
 VIEWS.users = {
   title: "Users",
+  noSavedViews: true,
   async render(el, actions) {
     const [users, settings] = await Promise.all([api("GET", "/api/users"), api("GET", "/api/settings"),
       loadLookups()]); // fresh fund list, so the access editor includes new funds
@@ -1873,6 +2075,48 @@ async function start() {
 
 // ------------------------------------------------------------------ router
 
+// Preferences a saved view restores along with the list's search, sort and filters.
+const VIEW_PREFS = ["fund", "lpMode", "dealMode", "roundMode", "taskTab"];
+
+/** "Views" menu: apply, save (private or shared) and delete named views of a screen. */
+async function savedViewsControl(view) {
+  const views = await api("GET", `/api/saved-views?view=${encodeURIComponent(view)}`).catch(() => []);
+  const sel = document.createElement("select");
+  const current = S.activeView[view] ?? "";
+  sel.innerHTML = `<option value="">All records</option>${views.map((v) =>
+    `<option value="${v.id}" ${String(v.id) === String(current) ? "selected" : ""}>${esc(v.name)}${v.shared ? " (shared)" : ""}</option>`).join("")}
+    <option value="save">Save current view...</option>
+    ${current ? '<option value="delete">Delete this view</option>' : ""}`;
+  sel.title = "Saved views";
+  sel.onchange = () => guard(async () => {
+    const choice = sel.value;
+    if (choice === "save") {
+      const name = prompt("Name this view (e.g. 'My LPs in due diligence'):", views.find((v) => String(v.id) === String(current))?.name ?? "");
+      if (!name) return render();
+      const shared = confirm("Share this view with everyone? (OK = shared, Cancel = only you)");
+      const state = { grid: S.gridState[view] ?? {}, prefs: Object.fromEntries(VIEW_PREFS.map((k) => [k, pref(k)])) };
+      const saved = await api("POST", "/api/saved-views", { view, name, shared, state });
+      S.activeView[view] = saved.id;
+      toast("View saved");
+    } else if (choice === "delete") {
+      if (confirm("Delete this saved view?")) {
+        await api("DELETE", `/api/saved-views/${current}`);
+        S.activeView[view] = "";
+      }
+    } else if (choice === "") {
+      S.activeView[view] = "";
+      S.gridState[view] = { sort: null, dir: 1, q: "", filters: [] };
+    } else {
+      const v = views.find((x) => String(x.id) === choice);
+      S.activeView[view] = v.id;
+      S.gridState[view] = structuredClone({ sort: null, dir: 1, q: "", filters: [], ...v.state.grid });
+      for (const [k, val] of Object.entries(v.state.prefs ?? {})) if (val != null) pref(k, val);
+    }
+    render();
+  }).catch(() => render());
+  return sel;
+}
+
 async function render() {
   const name = S.view;
   const v = VIEWS[name];
@@ -1882,15 +2126,17 @@ async function render() {
   actions.innerHTML = "";
   const el = $("#view");
   el.onclick = null; // a view may attach one; never let it leak into the next view
+  el.onchange = null;
   try {
     await v.render(el, actions);
+    if (!v.noSavedViews) actions.prepend(await savedViewsControl(name));
   } catch (e) {
     el.innerHTML = `<div class="panel bad">${esc(e.message)}</div>`;
   }
 }
 
 function go(name) {
-  S.view = VIEWS[name] && (name !== "users" || isAdmin()) ? name : "dashboard";
+  S.view = VIEWS[name] && (!["users", "custom-fields"].includes(name) || isAdmin()) ? name : "dashboard";
   if (location.hash.slice(1) !== S.view) location.hash = S.view;
   render();
 }

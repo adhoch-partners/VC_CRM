@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, jobs, mailer, metrics
-from . import data_io, search, security
+from . import analytics, custom, data_io, search, security
 from .access import LEVELS, PARENTS, Access, deny
 from .db import Database, IntegrityError
 from .entities import CAPITAL_EVENT_FIELDS, DEAL_STAGES, ENTITIES, LP_STAGES
@@ -107,6 +107,7 @@ PARENT_KEYS = {
     "realizations": [("companies", "company_id"), ("funds", "fund_id")],
     "capital_events": [("funds", "fund_id")],
     "rounds": [("companies", "company_id")],
+    "company_metrics": [("companies", "company_id")],
     "round_investors": [("rounds", "round_id"), ("investors", "investor_id")],
 }
 
@@ -241,7 +242,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
         row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (rid,)).fetchone()
         if not row:
             raise HTTPException(404, "Not found")
-        return dict(row)
+        return custom.expand(table, dict(row))
 
     def start_session(response, conn, row):
         conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?",
@@ -520,9 +521,13 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
     # ------------------------------------------------------------ metadata
 
     @app.get("/api/meta")
-    def meta(user=Depends(viewer)):
+    def meta(user=Depends(viewer), conn=Depends(get_conn)):
+        extra = custom.all_custom(conn)
         return {
-            "entities": ENTITIES,
+            "entities": {k: {**v, "fields": v["fields"] + extra.get(k, [])}
+                         for k, v in ENTITIES.items()},
+            "customizable": custom.CUSTOMIZABLE,
+            "custom_types": custom.TYPES,
             "capital_event_fields": CAPITAL_EVENT_FIELDS,
             "lp_stages": LP_STAGES,
             "deal_stages": DEAL_STAGES,
@@ -702,6 +707,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
     security.register(app, deps)
     search.register(app, deps)
     data_io.register(app, deps)
+    custom.register(app, deps)
+    analytics.register(app, deps)
 
     # ------------------------------------------------------------ generic CRUD
 
@@ -715,7 +722,7 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
     def list_rows(entity: str, request: Request, acc=Depends(get_access),
                   conn=Depends(get_conn)):
         m = entity_meta(entity)
-        names = {fl["name"] for fl in m["fields"]}
+        names = {fl["name"] for fl in m["fields"]}  # built-in fields only can be filtered in SQL
         filters = {k: v for k, v in request.query_params.items() if k in names}
         where = " AND ".join(f"{k} = ?" for k in filters)
         sql = f"SELECT * FROM {entity}" + (f" WHERE {where}" if where else "")
@@ -724,7 +731,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
                                                   list(filters.values()))]
         except IntegrityError:
             raise HTTPException(400, "Invalid filter value")
-        return [acc.annotate(entity, r) for r in rows if acc.can_view(entity, r)]
+        return [acc.annotate(entity, custom.expand(entity, r)) for r in rows
+                if acc.can_view(entity, r)]
 
     @app.get("/api/{entity}/{rid}")
     def get_row(entity: str, rid: int, acc=Depends(get_access), conn=Depends(get_conn)):
@@ -734,7 +742,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
     @app.post("/api/{entity}", status_code=201)
     def create_row(entity: str, data: dict = Body(...), acc=Depends(get_access),
                    conn=Depends(get_conn)):
-        row = coerce(entity_meta(entity)["fields"], data, partial=False)
+        entity_meta(entity)
+        row = coerce(custom.fields_for(conn, entity), data, partial=False)
         if entity in ("activities", "documents", "contact_links", "tasks") \
                 and row.get("entity") is not None and not acc.parent(row):
             raise HTTPException(400, "The record this is attached to does not exist")
@@ -748,7 +757,11 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
         check_rules(conn, entity, row)
         try:
             with conn.transaction():
-                rid = conn.insert(entity, row)
+                stored = dict(row)
+                extra = custom.split(stored)
+                if extra:
+                    stored["custom"] = custom.merged_json({}, extra)
+                rid = conn.insert(entity, stored)
                 audit(conn, acc.user, "create", entity, rid, row, record={**row, "id": rid})
         except IntegrityError as e:
             raise _integrity(e)
@@ -760,7 +773,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
     @app.patch("/api/{entity}/{rid}")
     def update_row(entity: str, rid: int, data: dict = Body(...), acc=Depends(get_access),
                    conn=Depends(get_conn)):
-        row = coerce(entity_meta(entity)["fields"], data, partial=True)
+        entity_meta(entity)
+        row = coerce(custom.fields_for(conn, entity), data, partial=True)
         old = visible_row(conn, acc, entity, rid)
         if not acc.can_edit(entity, old):
             raise deny("You have view-only access to this record.")
@@ -779,10 +793,14 @@ def create_app(database_url=None, cookie_secure=None, session_days=None, send_em
             changed["completed_at"] = auth.iso(auth.utcnow()) if changed["status"] == "Done" else None
         if changed:
             try:
+                stored = dict(changed)
+                extra = custom.split(stored)
+                if extra:
+                    stored["custom"] = custom.merged_json(old, extra)
                 with conn.transaction():
                     conn.execute(
-                        f"UPDATE {entity} SET {', '.join(f'{k} = ?' for k in changed)} "
-                        f"WHERE id = ?", [*changed.values(), rid])
+                        f"UPDATE {entity} SET {', '.join(f'{k} = ?' for k in stored)} "
+                        f"WHERE id = ?", [*stored.values(), rid])
                     audit(conn, acc.user, "update", entity, rid,
                           {k: {"from": old.get(k), "to": v} for k, v in changed.items()},
                           record={**old, **changed}, also=related(entity, old))

@@ -166,6 +166,16 @@ input[type=password] { border: 1px solid var(--border); background: var(--surfac
 pre.codes { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
   font-size: 15px; line-height: 1.6; user-select: all; white-space: pre-wrap; word-break: break-all; }
 
+.kpis-small .kpi .value { font-size: 18px; }
+.spark { color: var(--accent); display: block; margin-top: 4px; }
+.funnel-row { display: grid; grid-template-columns: 130px 1fr 50px 110px; gap: 10px; align-items: center; padding: 4px 0; }
+.funnel-bar { background: var(--surface-2); border-radius: 4px; height: 18px; overflow: hidden; }
+.funnel-bar > div { background: var(--accent); height: 100%; }
+.funnel-num { text-align: right; font-weight: 650; font-variant-numeric: tabular-nums; }
+.grid-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.chip { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 2px 10px; font-size: 12px; margin-right: 4px; }
+.filter-add { display: inline-flex; gap: 6px; align-items: center; }
+.filter-add select, .filter-add input { width: auto; }
 .badge { background: var(--bad); color: #fff; border-radius: 999px; font-size: 11px; padding: 0 6px; margin-left: 4px; }
 .search-box { position: relative; padding: 0 4px 6px; }
 #search-results { position: absolute; left: 4px; right: -220px; top: 38px; z-index: 30; background: var(--surface);

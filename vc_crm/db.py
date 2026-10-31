@@ -141,6 +141,9 @@ ADDED_COLUMNS = [
     ("users", "totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "totp_last_counter", "INTEGER"),
     ("users", "email_reminders", "INTEGER NOT NULL DEFAULT 1"),
+    # Custom field values (JSON) on every record type admins can add fields to.
+    *[(t, "custom", "TEXT") for t in
+      ("lps", "companies", "investors", "contacts", "commitments", "funds", "rounds")],
 ]
 
 

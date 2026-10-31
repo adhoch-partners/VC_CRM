@@ -14,20 +14,24 @@ from datetime import date, datetime
 from fastapi import Body, Depends, HTTPException
 from fastapi.responses import Response
 
+from . import custom
 from .entities import CAPITAL_EVENT_FIELDS, ENTITIES
 from .search import NAMED, find_duplicates, normalize
 
 # Record types that can be imported, in the order they usually need to be loaded.
 IMPORTABLE = ["funds", "lps", "investors", "companies", "commitments", "investments",
-              "valuations", "realizations", "rounds", "round_investors", "contacts"]
+              "valuations", "realizations", "rounds", "round_investors", "contacts",
+              "company_metrics"]
 MAX_ROWS = 5000
 # Extra columns a people import may have, linking each person to an organization.
 CONTACT_LINK_COLUMNS = {"lp": "lps", "company": "companies", "investor": "investors"}
 DATE_FORMATS = ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d", "%d-%b-%Y", "%b %d, %Y"]
 
 
-def fields_of(entity):
-    return CAPITAL_EVENT_FIELDS if entity == "capital_events" else ENTITIES[entity]["fields"]
+def fields_of(conn, entity):
+    if entity == "capital_events":
+        return CAPITAL_EVENT_FIELDS
+    return custom.fields_for(conn, entity)
 
 
 class Names:
@@ -82,7 +86,7 @@ def to_csv(rows, fields, names, extra=()):
 def export_rows(conn, acc, entity):
     order = ENTITIES[entity]["order"] if entity in ENTITIES else "id"
     rows = [dict(r) for r in conn.execute(f"SELECT * FROM {entity} ORDER BY {order}")]
-    return [r for r in rows if acc.can_view(entity, r)]
+    return [custom.expand(entity, r) for r in rows if acc.can_view(entity, r)]
 
 
 def parse_number(text):
@@ -143,7 +147,7 @@ def register(app, d):
                     text = parent["name"] + (f" ({link['role']})" if link["role"] else "")
                     linked.setdefault(link["contact_id"], []).append(text)
             extra = (("Linked to", lambda r: "; ".join(linked.get(r["id"], []))),)
-        body = to_csv(export_rows(conn, acc, entity), fields_of(entity), names, extra)
+        body = to_csv(export_rows(conn, acc, entity), fields_of(conn, entity), names, extra)
         return Response(body, media_type="text/csv", headers={
             "Content-Disposition": f'attachment; filename="{entity}-{date.today()}.csv"'})
 
@@ -155,7 +159,7 @@ def register(app, d):
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             for entity in [*ENTITIES, "capital_events"]:
                 z.writestr(f"{entity}.csv", to_csv(export_rows(conn, acc, entity),
-                                                   fields_of(entity), names))
+                                                   fields_of(conn, entity), names))
             allocs = [dict(r) for r in conn.execute(
                 "SELECT a.*, e.fund_id, e.event_type, e.event_date, c.lp_id "
                 "FROM capital_event_allocations a JOIN capital_events e ON e.id = a.event_id "
@@ -183,9 +187,9 @@ def register(app, d):
     # ------------------------------------------------------------ import
 
     @app.get("/api/import/{entity}/template.csv")
-    def import_template(entity: str, acc=Depends(get_access)):
+    def import_template(entity: str, acc=Depends(get_access), conn=Depends(get_conn)):
         check_entity(entity, IMPORTABLE)
-        cols = [f["label"] for f in fields_of(entity)]
+        cols = [f["label"] for f in fields_of(conn, entity)]
         return Response(",".join(f'"{c}"' for c in cols) + "\n", media_type="text/csv",
                         headers={"Content-Disposition":
                                  f'attachment; filename="{entity}-template.csv"'})
@@ -207,7 +211,7 @@ def register(app, d):
             raise HTTPException(400, "The file needs a header row and at least one data row.")
         if len(rows) - 1 > MAX_ROWS:
             raise HTTPException(400, f"At most {MAX_ROWS} rows per import.")
-        fields = fields_of(entity)
+        fields = fields_of(conn, entity)
         headers = list(rows[0])
         link_cols, role_col = {}, None
         if entity == "contacts":
@@ -304,7 +308,11 @@ def register(app, d):
         with conn.transaction():
             for status, row, links in ready:
                 if status in take:
-                    rid = conn.insert(entity, row)
+                    stored = dict(row)
+                    extra = custom.split(stored)
+                    if extra:
+                        stored["custom"] = custom.merged_json({}, extra)
+                    rid = conn.insert(entity, stored)
                     d.audit(conn, acc.user, "create", entity, rid, {**row, "imported": True},
                             record={**row, "id": rid})
                     for link in links:

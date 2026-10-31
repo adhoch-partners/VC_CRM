@@ -277,6 +277,47 @@ CREATE TABLE IF NOT EXISTS realizations (
     created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Operating metrics a portfolio company reports, one row per period.
+CREATE TABLE IF NOT EXISTS company_metrics (
+    id           INTEGER PRIMARY KEY,
+    company_id   INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    period_end   TEXT NOT NULL,
+    revenue      REAL,
+    arr          REAL,
+    gross_margin REAL,
+    burn         REAL,
+    cash         REAL,
+    headcount    INTEGER,
+    customers    INTEGER,
+    notes        TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, period_end)
+);
+
+-- Named filters / sorts on a list, private to a user or shared with everyone.
+CREATE TABLE IF NOT EXISTS saved_views (
+    id         INTEGER PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    view       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    state      TEXT NOT NULL,
+    shared     INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Admin-defined extra fields; values live in each table's `custom` JSON column.
+CREATE TABLE IF NOT EXISTS custom_fields (
+    id         INTEGER PRIMARY KEY,
+    entity     TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    label      TEXT NOT NULL,
+    field_type TEXT NOT NULL,
+    options    TEXT,
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (entity, key)
+);
+
 -- ---------------------------------------------------------------- Relationships
 
 -- People, who can be linked to several LPs, investors and companies over time.
@@ -358,6 +399,7 @@ CREATE INDEX IF NOT EXISTS idx_round_investors_round ON round_investors(round_id
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id);
 CREATE INDEX IF NOT EXISTS idx_audit_links ON audit_links(entity, entity_id);
 CREATE INDEX IF NOT EXISTS idx_contact_links_parent ON contact_links(entity, entity_id);
+CREATE INDEX IF NOT EXISTS idx_company_metrics_company ON company_metrics(company_id);
 CREATE INDEX IF NOT EXISTS idx_documents_parent ON documents(entity, entity_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(entity, entity_id);

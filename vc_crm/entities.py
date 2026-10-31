@@ -237,6 +237,23 @@ ENTITIES = {
             f("notes", "Notes", "longtext"),
         ],
     },
+    "company_metrics": {
+        "label": "KPIs",
+        "title": "period_end",
+        "order": "period_end DESC",
+        "fields": [
+            f("company_id", "Company", "ref", ref="companies", required=True),
+            f("period_end", "Period end", "date", required=True),
+            f("revenue", "Revenue (period)", "money"),
+            f("arr", "ARR", "money"),
+            f("gross_margin", "Gross margin %", "percent"),
+            f("burn", "Net burn / month", "money"),
+            f("cash", "Cash", "money"),
+            f("headcount", "Headcount", "integer"),
+            f("customers", "Customers", "integer"),
+            f("notes", "Notes", "longtext"),
+        ],
+    },
     "contacts": {
         "label": "People",
         "title": "name",

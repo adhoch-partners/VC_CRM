@@ -35,7 +35,7 @@ from fastapi import HTTPException
 LEVELS = ["viewer", "editor"]
 FUND_KEYED = {"commitments", "investments", "valuations", "realizations", "capital_events"}
 SHARED = {"lps", "companies"}
-ROUND_SCOPED = {"rounds", "round_investors"}
+ROUND_SCOPED = {"rounds", "round_investors", "company_metrics"}  # follow their company
 # Records that activities, documents, tasks and person links can be attached to.
 PARENTS = {"lps", "commitments", "companies", "funds", "investors", "rounds", "capital_events"}
 ATTACHED = {"activities", "documents", "contact_links"}  # always need a parent record
