@@ -141,6 +141,17 @@ ADDED_COLUMNS = [
     ("users", "totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "totp_last_counter", "INTEGER"),
     ("users", "email_reminders", "INTEGER NOT NULL DEFAULT 1"),
+    # Fund terms for fee / carry calculations.
+    ("funds", "mgmt_fee_rate", "REAL"),
+    ("funds", "fee_start_date", "TEXT"),
+    ("funds", "investment_period_end", "TEXT"),
+    ("funds", "post_ip_fee_rate", "REAL"),
+    ("funds", "post_ip_fee_basis", "TEXT"),
+    ("funds", "carry_rate", "REAL"),
+    ("funds", "hurdle_rate", "REAL"),
+    ("funds", "catch_up_rate", "REAL"),
+    ("funds", "wire_instructions", "TEXT"),
+    ("commitments", "fee_carry_exempt", "TEXT NOT NULL DEFAULT 'No'"),
     # Custom field values (JSON) on every record type admins can add fields to.
     *[(t, "custom", "TEXT") for t in
       ("lps", "companies", "investors", "contacts", "commitments", "funds", "rounds")],

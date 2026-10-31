@@ -172,6 +172,10 @@ pre.codes { background: var(--surface-2); border: 1px solid var(--border); borde
 .funnel-bar { background: var(--surface-2); border-radius: 4px; height: 18px; overflow: hidden; }
 .funnel-bar > div { background: var(--accent); height: 100%; }
 .funnel-num { text-align: right; font-weight: 650; font-variant-numeric: tabular-nums; }
+.form-group-title { grid-column: 1 / -1; font-weight: 650; color: var(--text); margin-top: 8px; padding-top: 10px;
+  border-top: 1px solid var(--border); }
+table.mini { border-collapse: collapse; margin: 8px 0; font-variant-numeric: tabular-nums; }
+table.mini td { padding: 2px 12px 2px 0; } table.mini td.num { text-align: right; }
 .grid-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
 .chip { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 2px 10px; font-size: 12px; margin-right: 4px; }
 .filter-add { display: inline-flex; gap: 6px; align-items: center; }

@@ -5,6 +5,7 @@ grid columns, board cards and edit forms rendered by the browser UI.
 """
 
 FUND_STATUSES = ["Raising", "Investing", "Harvesting", "Closed"]
+FEE_BASES = ["Committed capital", "Invested cost (active)"]
 
 LP_TYPES = [
     "Family office", "Endowment", "Foundation", "Pension", "Fund of funds",
@@ -76,6 +77,17 @@ ENTITIES = {
             f("first_close_date", "First close", "date"),
             f("final_close_date", "Final close", "date"),
             f("notes", "Notes", "longtext"),
+            # Economic terms (blank = not set; nothing is assumed).
+            f("mgmt_fee_rate", "Management fee % / year", "percent", group="terms"),
+            f("fee_start_date", "Fees start", "date", group="terms"),
+            f("investment_period_end", "Investment period ends", "date", group="terms"),
+            f("post_ip_fee_rate", "Fee % after investment period", "percent", group="terms"),
+            f("post_ip_fee_basis", "Fee basis after investment period", "select",
+              options=FEE_BASES, group="terms"),
+            f("carry_rate", "Carried interest %", "percent", group="terms"),
+            f("hurdle_rate", "Preferred return (hurdle) % / year", "percent", group="terms"),
+            f("catch_up_rate", "GP catch-up %", "percent", group="terms"),
+            f("wire_instructions", "Wire instructions (for notices)", "longtext", group="terms"),
         ],
     },
     "lps": {
@@ -110,6 +122,8 @@ ENTITIES = {
             f("next_step", "Next step"),
             f("next_step_date", "Next step date", "date"),
             f("notes", "Notes", "longtext"),
+            f("fee_carry_exempt", "No fees or carry (GP / affiliate)", "select",
+              options=["No", "Yes"], default="No"),
         ],
     },
     "companies": {

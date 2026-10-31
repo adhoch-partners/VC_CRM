@@ -96,6 +96,15 @@ CREATE TABLE IF NOT EXISTS funds (
     first_close_date TEXT,
     final_close_date TEXT,
     notes            TEXT,
+    mgmt_fee_rate        REAL,
+    fee_start_date       TEXT,
+    investment_period_end TEXT,
+    post_ip_fee_rate     REAL,
+    post_ip_fee_basis    TEXT,
+    carry_rate           REAL,
+    hurdle_rate          REAL,
+    catch_up_rate        REAL,
+    wire_instructions    TEXT,
     created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -134,6 +143,7 @@ CREATE TABLE IF NOT EXISTS commitments (
     next_step        TEXT,
     next_step_date   TEXT,
     notes            TEXT,
+    fee_carry_exempt TEXT NOT NULL DEFAULT 'No',
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (lp_id, fund_id)
 );

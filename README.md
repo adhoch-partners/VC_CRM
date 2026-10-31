@@ -255,6 +255,43 @@ LP sees its Fund II changes only). Deleted records keep their history on their p
 History cannot be edited or deleted from the app.
 Viewers see the same screens with editing turned off.
 
+## Fund economics and LP reports
+
+Enter each fund's terms on its record under **Economic terms**: management fee %, the date fees
+start (defaults to first close), the investment period end, the fee % and basis after it
+(committed capital or cost of investments still held), carried interest %, preferred return
+(hurdle) % and GP catch-up %. Nothing is assumed: blank terms count as zero and the fund shows
+which are missing. Mark a commitment **No fees or carry (GP / affiliate)** for the GP commit.
+
+The fund record's **Economics** section (pick any "as of" date) shows fees accrued, estimated
+cash and NAV, accrued carry with the waterfall split, net TVPI / DPI / IRR next to gross, and
+each LP's paid-in, distributions, fees, carry, net NAV, TVPI and net IRR.
+
+**Documents** (open in a new tab; use Print > Save as PDF):
+- **Capital account statement** per LP (Economics section or Funds & capital > LP capital
+  accounts > Statement), or **All LP statements** for a fund in one document.
+- **Capital call / distribution notice** per LP from a capital call's allocation list, with the
+  fund's wire instructions on calls.
+
+**How it is calculated** (these are estimates; check them against your own model before sending
+anything to LPs):
+- Fees accrue daily (rate x basis / 365). During the investment period the basis is fee-paying
+  committed capital; afterwards, committed capital or the cost of investments not yet fully
+  exited, at the post-period rate (or the same rate if blank). LPs in later closes are treated
+  as paying from the fee start date (equalized).
+- Fund cash is estimated as capital called - invested cost - fees + exit proceeds -
+  distributions; fees are assumed to be paid from called capital. Fund expenses other than
+  management fees are not tracked. If recorded calls do not cover investments and fees, the
+  fund shows a warning because cash would be negative.
+- NAV = unrealized portfolio value + estimated cash. Each LP's share before fees and carry is
+  pro rata to paid-in capital; fees are then charged to fee-paying LPs pro rata to commitment.
+- Carry is a **whole-fund (European) waterfall** on the carry-paying LPs, as if everything were
+  sold at NAV on the as-of date: return of contributed capital, then the preferred return
+  (compounded annually on each contribution, net of distributions), then GP catch-up at the
+  catch-up % until the GP has the carry % of all profit, then the carry split. Distributions to
+  date are assumed to have gone entirely to LPs (no carry paid yet). Deal-by-deal (American)
+  waterfalls, clawback, recycling and fee offsets are not modeled.
+
 ## KPIs, analytics, saved views and custom fields
 
 - **Portfolio KPIs:** on a company's **KPIs** tab, record each period's revenue, ARR, gross

@@ -496,9 +496,14 @@ function closeDrawer() {
 $("#drawer-backdrop").onclick = closeDrawer;
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#drawer").hidden) closeDrawer(); });
 
+const FIELD_GROUPS = { terms: "Economic terms (leave blank if not applicable)" };
 function formHtml(fields, values = {}) {
-  return `<form class="form">${fields.map((f) =>
-    `<label class="${f.type === "longtext" ? "wide" : ""}">${esc(f.label)}${f.type === "money" ? " ($000s)" : ""}${f.required ? " *" : ""}${input(f, values[f.name])}</label>`).join("")}</form>`;
+  let group = null;
+  return `<form class="form">${fields.map((f) => {
+    const head = f.group && f.group !== group ? `<div class="form-group-title">${esc(FIELD_GROUPS[f.group] ?? f.group)}</div>` : "";
+    group = f.group ?? group;
+    return `${head}<label class="${f.type === "longtext" ? "wide" : ""}">${esc(f.label)}${f.type === "money" ? " ($000s)" : ""}${f.required ? " *" : ""}${input(f, values[f.name])}</label>`;
+  }).join("")}</form>`;
 }
 function formValues(form, fields, original = null) {
   const out = {};
@@ -597,6 +602,7 @@ async function editRecord(entity, row, after, defaults = {}) {
     if (entity === "companies") await companyExtras(extra, row, after);
     if (entity === "lps") await lpExtras(extra, row, after);
     if (entity === "rounds") roundExtras(extra, row);
+    if (entity === "funds") await economicsSection(extra, row);
     if (entity === "investors") await investorExtras(extra, row);
     if (entity === "contacts") await contactLinksSection(extra, row);
     if (CONTACT_PARENTS.includes(entity)) await peopleSection(extra, entity, row);
@@ -1026,6 +1032,52 @@ function sparkline(values, w = 140, h = 36) {
     <polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
+/** Fund economics on a fund's record: fees, NAV, carry and each LP's net account. */
+async function economicsSection(el, fund) {
+  const box = document.createElement("div");
+  el.append(box);
+  const draw = async (asOf) => {
+    const e = await api("GET", `/api/funds/${fund.id}/economics${asOf ? `?as_of=${asOf}` : ""}`);
+    const w = e.waterfall;
+    const big = (n) => fmt.money(n, false);
+    box.innerHTML = `<div class="section-title">Economics
+        <span><input type="date" data-asof value="${e.as_of}" style="width:auto">
+        <a class="btn small" href="/reports/fund/${fund.id}/statements?as_of=${e.as_of}" target="_blank" rel="noopener">All LP statements</a></span></div>
+      ${e.missing_terms.length ? `<div class="dup-warning">Terms not set: ${esc(e.missing_terms.join(", "))}. Fill them in above (Economic terms) to include them; until then they count as zero.</div>` : ""}
+      ${e.warnings.map((x) => `<div class="dup-warning">${esc(x)}</div>`).join("")}
+      <div class="kpis kpis-small" style="margin-top:10px">
+        <div class="kpi"><div class="label">Fees accrued</div><div class="value">${fmt.money(e.fees_accrued)}</div><div class="sub">${fmt.money(e.annual_fee_now) || "$0"} / year now</div></div>
+        <div class="kpi"><div class="label">NAV before carry</div><div class="value">${fmt.money(e.nav_before_carry)}</div><div class="sub">incl. est. cash ${fmt.money(e.cash_estimate)}</div></div>
+        <div class="kpi"><div class="label">Accrued carry</div><div class="value">${fmt.money(e.carry_accrued) || "$0"}</div></div>
+        <div class="kpi"><div class="label">Net TVPI · DPI</div><div class="value">${fmt.multiple(e.net_tvpi)}</div><div class="sub">DPI ${fmt.multiple(e.net_dpi)} · gross MOIC ${fmt.multiple(e.gross_moic)}</div></div>
+        <div class="kpi"><div class="label">Net IRR</div><div class="value">${fmt.pct(e.net_irr)}</div><div class="sub">gross ${fmt.pct(e.gross_irr)}</div></div>
+      </div>
+      <details style="margin:8px 0"><summary class="link">How the carry is split (if sold at NAV on ${esc(e.as_of)})</summary>
+        <table class="mini">${[["Return of capital to LPs", w.return_of_capital], ["Preferred return to LPs", w.preferred_return],
+          ["GP catch-up", w.catch_up], ["Remaining split: LPs", w.split_lp], ["Remaining split: GP", w.split_gp],
+          ["Total GP carry", w.gp_carry]].map(([k, v]) => `<tr><td>${k}</td><td class="num">${big(v)}</td></tr>`).join("")}</table>
+        <div class="muted" style="font-size:12px">Fees by year: ${Object.entries(e.fees_by_year).map(([y, v]) => `${y} ${big(v)}`).join(" · ") || "none"}.
+          Estimates from the terms above and recorded calls, investments, marks and exits; see README for the method.</div></details>
+      <div data-lps></div>`;
+    renderGrid($("[data-lps]", box), {
+      rows: e.lps.map((x) => ({ ...x, id: x.commitment_id })), search: false,
+      cols: [
+        { name: "lp", label: "LP", value: (r) => esc(r.lp) + (r.exempt ? ' <span class="pill">no fees/carry</span>' : "") },
+        { name: "paid_in", label: "Paid-in", num: true, value: (r) => fmt.money(r.paid_in) },
+        { name: "distributed", label: "Distributed", num: true, value: (r) => fmt.money(r.distributed) },
+        { name: "fees", label: "Fees", num: true, value: (r) => fmt.money(r.fees) },
+        { name: "carry", label: "Carry", num: true, value: (r) => fmt.money(r.carry) },
+        { name: "nav", label: "Net NAV", num: true, value: (r) => fmt.money(r.nav) },
+        { name: "tvpi", label: "TVPI", num: true, value: (r) => fmt.multiple(r.tvpi) },
+        { name: "net_irr", label: "Net IRR", num: true, value: (r) => fmt.pct(r.net_irr) },
+        { name: "st", label: "", value: (r) => `<a href="/reports/statement/${r.commitment_id}?as_of=${e.as_of}" target="_blank" rel="noopener">Statement</a>` },
+      ],
+    });
+    $("[data-asof]", box).onchange = (ev) => guard(() => draw(ev.target.value));
+  };
+  await draw();
+}
+
 function roundExtras(el, rnd) {
   const box = document.createElement("div");
   box.innerHTML = `<div class="section-title">Investor pipeline
@@ -1235,6 +1287,7 @@ VIEWS.funds = {
         { name: "pct_called", label: "% called", num: true, value: (r) => fmt.pct(r.pct_called, 0) },
         sumCol("unfunded", "Unfunded"), sumCol("distributed", "Distributed"),
         { name: "dpi", label: "DPI", num: true, value: (r) => fmt.multiple(r.dpi) },
+        { name: "statement", label: "", value: (r) => `<a href="/reports/statement/${r.commitment_id}" target="_blank" rel="noopener">Statement</a>` },
       ],
     });
     renderGrid($("[data-e]", el), {
@@ -1286,6 +1339,7 @@ async function showCapitalEvent(ev, after) {
         total: (l) => fmt.money(l.reduce((t, r) => t + r.amount, 0)) },
       { name: "paid", label: isCall ? "Received" : "Paid out",
         value: (r) => `<input type="checkbox" data-paid="${r.id}" ${r.paid ? "checked" : ""} ${ev._can_edit ? "" : "disabled"}>` },
+      { name: "notice", label: "", value: (r) => `<a href="/reports/notice/${r.id}" target="_blank" rel="noopener">Notice</a>` },
     ],
   });
   d.querySelectorAll("[data-paid]").forEach((cb) => (cb.onchange = () => guard(async () => {

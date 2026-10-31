@@ -59,15 +59,26 @@ def _ratio(num, den):
 
 
 def holdings(conn, fund_id=None, as_of=None):
-    """One row per (company, fund) position with cost, value and returns."""
+    """One row per (company, fund) position with cost, value and returns.
+
+    With an explicit `as_of`, investments, exits and marks dated after it are ignored,
+    so a past date shows the portfolio as it stood then."""
+    cutoff = as_of
     as_of = as_of or date.today().isoformat()
     where, args = ("WHERE fund_id = ?", [fund_id]) if fund_id else ("", [])
+
+    def dated(col):
+        """WHERE clause and args, adding the as-of cutoff on `col` when one was given."""
+        if not cutoff:
+            return where, args
+        return ((where + " AND " if where else "WHERE ") + f"{col} <= ?", [*args, cutoff])
 
     flows = defaultdict(list)
     invested = defaultdict(float)
     last_invest = {}
     for r in conn.execute(
-        f"SELECT company_id, fund_id, investment_date, amount FROM investments {where}", args
+        "SELECT company_id, fund_id, investment_date, amount FROM investments "
+        + dated("investment_date")[0], dated("investment_date")[1]
     ):
         k = (r["company_id"], r["fund_id"])
         invested[k] += r["amount"]
@@ -77,8 +88,8 @@ def holdings(conn, fund_id=None, as_of=None):
     realized = defaultdict(float)
     terminal = {}
     for r in conn.execute(
-        f"SELECT company_id, fund_id, realization_date, realization_type, proceeds "
-        f"FROM realizations {where}", args
+        "SELECT company_id, fund_id, realization_date, realization_type, proceeds "
+        "FROM realizations " + dated("realization_date")[0], dated("realization_date")[1]
     ):
         k = (r["company_id"], r["fund_id"])
         realized[k] += r["proceeds"]
@@ -89,8 +100,8 @@ def holdings(conn, fund_id=None, as_of=None):
 
     latest_val = {}
     for r in conn.execute(
-        f"SELECT company_id, fund_id, valuation_date, fair_value FROM valuations {where} "
-        f"ORDER BY valuation_date, id", args
+        "SELECT company_id, fund_id, valuation_date, fair_value FROM valuations "
+        + dated("valuation_date")[0] + " ORDER BY valuation_date, id", dated("valuation_date")[1]
     ):
         latest_val[(r["company_id"], r["fund_id"])] = (r["valuation_date"], r["fair_value"])
 
