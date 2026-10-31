@@ -13,11 +13,16 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 204) return null;
-  if (res.status === 401 && path !== "/api/auth/login") {
+  const ownAuthErrors = ["/api/auth/login", "/api/auth/2fa", "/api/auth/forgot", "/api/auth/reset"];
+  if (res.status === 401 && !ownAuthErrors.includes(path)) {
     showLogin();
     throw new Error("Your session has ended. Please sign in again.");
   }
   const data = await res.json().catch(() => ({}));
+  if (res.status === 403 && String(data.detail).startsWith("Two-factor authentication must be set up")) {
+    showEnroll();
+    throw new Error(data.detail);
+  }
   if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : res.statusText);
   return data;
 }
@@ -450,7 +455,7 @@ async function editRecord(entity, row, after, defaults = {}) {
     if (entity === "rounds") roundExtras(extra, row);
     if (entity === "investors") await investorExtras(extra, row);
     if (ACTIVITY_OWNERS.includes(entity)) await activityLog(extra, entity, row.id, Boolean(row._can_edit));
-    await history(extra, entity, row.id);
+    await changeHistory(extra, entity, row.id);
   }
 }
 
@@ -567,7 +572,7 @@ const localTime = (at) => new Date(`${at.replace(" ", "T")}Z`)
   .toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 
 /** Change history panel: this record's changes plus its related records', newest first. */
-async function history(el, entity, id) {
+async function changeHistory(el, entity, id) {
   const PAGE = 25;
   const box = document.createElement("div");
   box.innerHTML = `<div class="section-title">Change history
@@ -903,7 +908,7 @@ async function showCapitalEvent(ev, after) {
     closeDrawer();
     after?.();
   });
-  await history(d, "capital_events", ev.id);
+  await changeHistory(d, "capital_events", ev.id);
 }
 
 VIEWS["deal-board"] = {
@@ -1111,9 +1116,22 @@ VIEWS.portfolio = {
 VIEWS.users = {
   title: "Users",
   async render(el, actions) {
-    actions.append(button("+ Invite user", () => newUser(render), "primary"));
-    // Fresh fund list, so the access editor includes funds created since page load.
-    const [users] = await Promise.all([api("GET", "/api/users"), loadLookups()]);
+    const [users, settings] = await Promise.all([api("GET", "/api/users"), api("GET", "/api/settings"),
+      loadLookups()]); // fresh fund list, so the access editor includes new funds
+    const req = document.createElement("label");
+    req.className = "muted";
+    req.innerHTML = `<input type="checkbox" ${settings.require_2fa === "1" ? "checked" : ""}> Require two-factor for everyone`;
+    $("input", req).onchange = (e) => guard(async () => {
+      const on = e.target.checked;
+      if (on && !confirm("Everyone without two-factor (including you, if not set up) will be asked to set it up before they can use the app. Continue?")) {
+        e.target.checked = false;
+        return;
+      }
+      await api("PUT", "/api/settings", { require_2fa: on ? "1" : "0" });
+      toast(on ? "Two-factor is now required" : "Two-factor is now optional");
+      if (on && !S.me.totp_enabled) showEnroll();
+    });
+    actions.append(req, button("+ Invite user", () => newUser(render), "primary"));
     el.innerHTML = `<div class="panel muted" style="line-height:1.6">
       <b>Admins</b> see and edit every fund and manage users.<br>
       <b>Everyone else</b> sees only the funds they are given: <b>Viewer</b> (read-only) or <b>Editor</b> per fund.
@@ -1131,26 +1149,41 @@ VIEWS.users = {
         { name: "funds", label: "Fund access", value: (r) => (r.role === "admin" ? '<span class="muted">All funds (admin)</span>'
           : `${esc(fundAccessSummary(r.fund_access)) || '<span class="muted">No funds</span>'} · <span class="link" data-funds="${r.id}">Edit</span>`) },
         { name: "active", label: "Status", value: (r) => (r.active ? "Active" : '<span class="muted">Deactivated</span>') },
+        { name: "totp_enabled", label: "Two-factor", value: (r) => (r.totp_enabled ? "On" : '<span class="muted">Off</span>') },
         { name: "last_login_at", label: "Last sign-in (UTC)", value: (r) => esc(r.last_login_at || "Never") },
         { name: "actions", label: "", value: (r) => `<span class="link" data-reset="${r.id}">Reset password</span> ·
+          ${r.totp_enabled ? `<span class="link" data-reset2fa="${r.id}">Reset two-factor</span> · ` : ""}
           <span class="link" data-toggle="${r.id}">${r.active ? "Deactivate" : "Reactivate"}</span>` },
       ],
     });
     const patch = (id, body) => guard(async () => { await api("PATCH", `/api/users/${id}`, body); toast("Saved"); render(); })
       .catch(() => render());
-    el.querySelectorAll("[data-role]").forEach((x) => (x.onchange = () => patch(x.dataset.role, { role: x.value })));
-    el.querySelectorAll("[data-toggle]").forEach((x) => (x.onclick = () => {
-      const u = users.find((r) => String(r.id) === x.dataset.toggle);
-      if (u.active && !confirm(`Deactivate ${u.name}? They will be signed out.`)) return;
-      patch(u.id, { active: !u.active });
-    }));
-    el.querySelectorAll("[data-funds]").forEach((x) => (x.onclick = () =>
-      editFundAccess(users.find((r) => String(r.id) === x.dataset.funds), render)));
-    el.querySelectorAll("[data-reset]").forEach((x) => (x.onclick = () => {
-      const u = users.find((r) => String(r.id) === x.dataset.reset);
-      const pw = prompt(`New temporary password for ${u.name} (at least 10 characters). They will be signed out everywhere.`);
-      if (pw) patch(u.id, { password: pw });
-    }));
+    const userOf = (id) => users.find((r) => String(r.id) === id);
+    // Delegated, so the links keep working after the grid is sorted or searched.
+    el.onchange = (e) => {
+      const x = e.target.closest("[data-role]");
+      if (x) patch(x.dataset.role, { role: x.value });
+    };
+    el.onclick = (e) => {
+      const t = e.target.closest("[data-toggle],[data-funds],[data-reset],[data-reset2fa]");
+      if (!t) return;
+      if (t.dataset.toggle) {
+        const u = userOf(t.dataset.toggle);
+        if (u.active && !confirm(`Deactivate ${u.name}? They will be signed out.`)) return;
+        patch(u.id, { active: !u.active });
+      } else if (t.dataset.funds) {
+        editFundAccess(userOf(t.dataset.funds), render);
+      } else if (t.dataset.reset) {
+        const u = userOf(t.dataset.reset);
+        const pw = prompt(`New temporary password for ${u.name} (at least 10 characters). They will be signed out everywhere.`);
+        if (pw) patch(u.id, { password: pw });
+      } else if (t.dataset.reset2fa) {
+        const u = userOf(t.dataset.reset2fa);
+        if (confirm(`Reset two-factor for ${u.name}? Use this when they lose their phone. They are signed out and set it up again at next sign-in.`)) {
+          patch(u.id, { reset_2fa: true });
+        }
+      }
+    };
   },
 };
 
@@ -1185,7 +1218,7 @@ function editFundAccess(u, after) {
     closeDrawer();
     after();
   });
-  history(d, "users", u.id);
+  changeHistory(d, "users", u.id);
 }
 
 function newUser(after) {
@@ -1232,33 +1265,188 @@ function changePassword() {
 
 // ------------------------------------------------------------------ session
 
-function showLogin() {
+/** Sign-in card: password, then authenticator code; forgot-password and reset-link forms. */
+function loginCard(html, onsubmit) {
   S.me = null;
   closeDrawer();
   $("#app").hidden = true;
   const box = $("#login");
   box.hidden = false;
   const f = $("form", box);
-  $("[data-err]", box).textContent = "";
-  f.password.value = "";
-  (f.email.value ? f.password : f.email).focus();
+  f.innerHTML = `<div class="brand">VC CRM</div>${html}<div class="bad" data-err></div>`;
+  const err = $("[data-err]", f);
   f.onsubmit = async (e) => {
     e.preventDefault();
-    $("[data-err]", box).textContent = "";
+    err.textContent = "";
+    try { await onsubmit(f); } catch (x) { err.textContent = x.message; }
+  };
+  f.onclick = (e) => {
+    const link = e.target.closest("[data-go]");
+    if (link) ({ forgot: showForgot, login: showLogin })[link.dataset.go]();
+  };
+  f.querySelector("input")?.focus();
+  return f;
+}
+
+async function finishLogin(me) {
+  S.me = me;
+  $("#login").hidden = true;
+  if (location.hash.startsWith("#reset=")) window.history.replaceState(null, "", "#dashboard");
+  const full = await api("GET", "/api/auth/me");
+  S.me = full;
+  if (full.must_enroll_2fa) return showEnroll();
+  await start();
+}
+
+function showLogin(email = "") {
+  loginCard(`
+    <label>Email<input type="text" name="email" autocomplete="username" required value="${esc(email)}"></label>
+    <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+    <button class="btn primary">Sign in</button>
+    <span class="link" data-go="forgot" style="font-size:12px">Forgot your password?</span>`, async (f) => {
+    const r = await api("POST", "/api/auth/login", { email: f.email.value, password: f.password.value });
+    if (r.twofa_required) return showCode(r.challenge, f.email.value);
+    await finishLogin(r);
+  });
+}
+
+function showCode(challenge, email) {
+  loginCard(`
+    <div class="muted">Enter the 6-digit code from your authenticator app, or one of your recovery codes.</div>
+    <label>Code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+    <button class="btn primary">Verify</button>
+    <span class="link" data-go="login" style="font-size:12px">Back</span>`, async (f) => {
     try {
-      S.me = await api("POST", "/api/auth/login", { email: f.email.value, password: f.password.value });
-      box.hidden = true;
-      await start();
-    } catch (err) {
-      $("[data-err]", box).textContent = err.message;
+      await finishLogin(await api("POST", "/api/auth/2fa", { challenge, code: f.code.value }));
+    } catch (x) {
+      if (/expired/.test(x.message)) showLogin(email);
+      throw x;
+    }
+  });
+}
+
+function showForgot() {
+  loginCard(`
+    <div class="muted">Enter your email and we'll send a link to choose a new password.</div>
+    <label>Email<input type="text" name="email" autocomplete="username" required></label>
+    <button class="btn primary">Send reset link</button>
+    <span class="link" data-go="login" style="font-size:12px">Back to sign in</span>`, async (f) => {
+    await api("POST", "/api/auth/forgot", { email: f.email.value });
+    f.innerHTML = `<div class="brand">VC CRM</div><div>If that email has an account, a reset link is on its way.
+      It works for 60 minutes. No email? Check spam, or ask an admin to reset your password.</div>
+      <span class="link" data-go="login">Back to sign in</span>`;
+  });
+}
+
+function showReset(token) {
+  loginCard(`
+    <div class="muted">Choose a new password (at least 10 characters). You'll be signed out on other devices.</div>
+    <label>New password<input type="password" name="pw" autocomplete="new-password" required></label>
+    <label>Repeat new password<input type="password" name="pw2" autocomplete="new-password" required></label>
+    <button class="btn primary">Set password</button>`, async (f) => {
+    if (f.pw.value !== f.pw2.value) throw new Error("Passwords do not match.");
+    await api("POST", "/api/auth/reset", { token, new_password: f.pw.value });
+    window.history.replaceState(null, "", "#dashboard");
+    showLogin();
+    toast("Password changed. Sign in with your new password.");
+  });
+}
+
+/** Two-factor setup: scan the QR code, confirm a code, save recovery codes. */
+async function showEnroll(fromSettings = false) {
+  const setup = await api("POST", "/api/auth/2fa/setup");
+  const html = `
+    <h2 style="margin:0">Set up two-factor sign-in</h2>
+    <div class="muted">${fromSettings ? "" : "Your admin requires this for everyone. "}Open an authenticator app
+      (Google Authenticator, Microsoft Authenticator, 1Password...) and scan this code:</div>
+    <div class="qr">${setup.qr_svg ?? ""}</div>
+    <div class="muted" style="font-size:12px">Can't scan? Enter this key: <code>${esc(setup.secret.match(/.{1,4}/g).join(" "))}</code></div>
+    <label>6-digit code from the app<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+    <div><button class="btn primary">Turn on two-factor</button>
+      ${fromSettings ? '<button type="button" class="btn" data-cancel>Cancel</button>' : '<button type="button" class="btn" data-signout>Sign out</button>'}</div>`;
+  const done = async (f) => {
+    const { recovery_codes: codes } = await api("POST", "/api/auth/2fa/enable", { code: f.code.value });
+    showRecoveryCodes(codes, fromSettings);
+  };
+  if (fromSettings) {
+    const d = openDrawer(`<form class="form" style="grid-template-columns:1fr">${html}<div class="bad" data-err></div></form>`);
+    const f = $("form", d);
+    $("[data-cancel]", d).onclick = closeDrawer;
+    f.onsubmit = (e) => { e.preventDefault(); guard(() => done(f)).catch(() => {}); };
+    return;
+  }
+  const f = loginCard(html, done);
+  $("[data-signout]", f).onclick = async () => { await api("POST", "/api/auth/logout"); showLogin(); };
+}
+
+function showRecoveryCodes(codes, inDrawer) {
+  const html = `<h2 style="margin:0">Save your recovery codes</h2>
+    <div class="muted">If you lose your phone, each of these codes signs you in once. Store them in your password
+      manager now; they won't be shown again.</div>
+    <pre class="codes">${codes.map(esc).join("\n")}</pre>
+    <div><button type="button" class="btn" data-copy>Copy codes</button>
+      <button type="button" class="btn primary" data-done>I've saved them</button></div>`;
+  const root = inDrawer ? openDrawer(`<div class="form" style="grid-template-columns:1fr">${html}</div>`) : loginCard(html, async () => {});
+  $("[data-copy]", root).onclick = () => navigator.clipboard?.writeText(codes.join("\n")).then(() => toast("Copied"));
+  $("[data-done]", root).onclick = async () => {
+    if (inDrawer) { closeDrawer(); S.me = await api("GET", "/api/auth/me"); return; }
+    $("#login").hidden = true;
+    S.me = await api("GET", "/api/auth/me");
+    await start();
+  };
+}
+
+/** Account security drawer: two-factor status and personal API tokens. */
+async function showSecurity() {
+  const tokens = await api("GET", "/api/tokens");
+  const me = (S.me = await api("GET", "/api/auth/me"));
+  const d = openDrawer(`<h2>Account security</h2>
+    <div class="section-title">Two-factor sign-in</div>
+    <div>${me.totp_enabled ? "On. You'll be asked for a code from your authenticator app when you sign in." : "Off. Turn it on to protect your account if your password leaks."}</div>
+    <div style="margin:10px 0">${me.totp_enabled
+      ? `<button class="btn" data-codes>New recovery codes</button>${me.require_2fa ? "" : ' <button class="btn danger" data-off>Turn off</button>'}`
+      : '<button class="btn primary" data-on>Turn on two-factor</button>'}</div>
+    <div class="section-title">API tokens <button class="btn small" data-new>+ New token</button></div>
+    <div class="muted">Tokens let scripts, or Claude logging your Granola meetings, use the CRM as you, with your
+      permissions. Treat them like passwords and revoke any you no longer use.</div>
+    <div data-tokens style="margin-top:8px">${tokens.map((t) => `<div class="activity"><b>${esc(t.name)}</b>
+      <span class="muted">${esc(t.prefix)}... · created ${esc(localTime(t.created_at))} ·
+      ${t.last_used_at ? `last used ${esc(localTime(t.last_used_at))}` : "never used"}</span>
+      <span class="link" data-revoke="${t.id}" style="float:right">revoke</span></div>`).join("") || '<div class="muted">No tokens.</div>'}</div>
+    <div class="drawer-actions" style="margin-top:16px"><button class="btn" data-close>Close</button></div>`);
+  d.onclick = (e) => {
+    const t = e.target.closest("[data-on],[data-off],[data-codes],[data-new],[data-revoke],[data-close]");
+    if (!t) return;
+    if (t.matches("[data-close]")) closeDrawer();
+    else if (t.matches("[data-on]")) guard(() => showEnroll(true));
+    else if (t.matches("[data-off]")) {
+      const pw = prompt("Enter your password to turn off two-factor:");
+      if (pw) guard(async () => { await api("POST", "/api/auth/2fa/disable", { password: pw }); toast("Two-factor turned off"); showSecurity(); });
+    } else if (t.matches("[data-codes]")) {
+      const pw = prompt("Enter your password to replace your recovery codes (the old ones stop working):");
+      if (pw) guard(async () => showRecoveryCodes((await api("POST", "/api/auth/2fa/recovery-codes", { password: pw })).recovery_codes, true));
+    } else if (t.matches("[data-new]")) {
+      const name = prompt("Name this token (e.g. 'Claude meeting notes'):");
+      if (name) guard(async () => {
+        const r = await api("POST", "/api/tokens", { name });
+        const box = openDrawer(`<h2>Your new API token</h2><div class="muted">Copy it now; it won't be shown again.</div>
+          <pre class="codes">${esc(r.token)}</pre><div><button class="btn" data-copy>Copy</button>
+          <button class="btn primary" data-back>Done</button></div>`);
+        $("[data-copy]", box).onclick = () => navigator.clipboard?.writeText(r.token).then(() => toast("Copied"));
+        $("[data-back]", box).onclick = () => showSecurity();
+      });
+    } else if (t.dataset.revoke && confirm("Revoke this token? Anything using it stops working immediately.")) {
+      guard(async () => { await api("DELETE", `/api/tokens/${t.dataset.revoke}`); toast("Token revoked"); showSecurity(); });
     }
   };
 }
 
 function renderMe() {
   $("#me").innerHTML = `<div class="who">${esc(S.me.name)}</div><div class="muted">${esc(S.me.email)} · ${esc(S.me.role)}</div>
-    <div style="margin-top:6px"><span class="link" data-pw>Change password</span> · <span class="link" data-out>Sign out</span></div>`;
+    <div style="margin-top:6px"><span class="link" data-pw>Change password</span> · <span class="link" data-sec>Security</span>
+      · <span class="link" data-out>Sign out</span></div>`;
   $("[data-pw]", $("#me")).onclick = changePassword;
+  $("[data-sec]", $("#me")).onclick = () => guard(showSecurity);
   $("[data-out]", $("#me")).onclick = async () => { await api("POST", "/api/auth/logout"); showLogin(); };
   document.querySelectorAll("[data-admin]").forEach((x) => (x.hidden = !isAdmin()));
 }
@@ -1296,13 +1484,21 @@ function go(name) {
 }
 
 $("#nav").onclick = (e) => { const a = e.target.closest("a[data-view]"); if (a) go(a.dataset.view); };
-window.addEventListener("hashchange", () => { if (location.hash.slice(1) !== S.view) go(location.hash.slice(1)); });
+window.addEventListener("hashchange", () => {
+  // A password-reset link opened in a tab where the app is already loaded.
+  const reset = location.hash.match(/^#reset=(.+)$/);
+  if (reset) return showReset(decodeURIComponent(reset[1]));
+  if (S.me && location.hash.slice(1) !== S.view) go(location.hash.slice(1));
+});
 
 (async () => {
+  const reset = location.hash.match(/^#reset=(.+)$/);
+  if (reset) return showReset(decodeURIComponent(reset[1]));
   try {
     S.me = await api("GET", "/api/auth/me");
   } catch {
     return; // showLogin() already ran on the 401
   }
+  if (S.me.must_enroll_2fa) return showEnroll();
   await start();
 })();

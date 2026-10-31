@@ -78,12 +78,27 @@ def session_user(conn, token):
     if not token:
         return None
     row = conn.execute(
-        "SELECT u.id, u.email, u.name, u.role, u.active FROM sessions s "
+        "SELECT u.id, u.email, u.name, u.role, u.active, u.totp_enabled FROM sessions s "
         "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?",
         (token_hash(token), iso(utcnow()))).fetchone()
     if not row or not row["active"]:
         return None
     return dict(row)
+
+
+def token_user(conn, token):
+    """The user behind a personal API token (Authorization: Bearer crm_...)."""
+    if not token or not token.startswith(TOKEN_PREFIX):
+        return None
+    row = conn.execute(
+        "SELECT u.id, u.email, u.name, u.role, u.active, u.totp_enabled, t.id AS token_id "
+        "FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?",
+        (token_hash(token),)).fetchone()
+    if not row or not row["active"]:
+        return None
+    conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?",
+                 (iso(utcnow()), row["token_id"]))
+    return {k: row[k] for k in ("id", "email", "name", "role", "active", "totp_enabled")}
 
 
 class LoginThrottle:
@@ -123,3 +138,62 @@ class LoginThrottle:
     def clear(self, key):
         with self.lock:
             self.failures.pop(key, None)
+
+
+# ---------------------------------------------------------------- two-factor (TOTP, RFC 6238)
+
+TOTP_STEP = 30
+TOTP_DIGITS = 6
+
+
+def new_totp_secret():
+    return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+
+
+def _totp_at(secret, counter):
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
+    digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return str(value % 10 ** TOTP_DIGITS).zfill(TOTP_DIGITS)
+
+
+def verify_totp(secret, code, last_counter=None, now=None):
+    """Return the matching time step, or None. Accepts one step of clock drift either
+    way, and refuses a step at or before `last_counter` so a code cannot be replayed."""
+    code = "".join(ch for ch in str(code or "") if ch.isdigit())
+    if len(code) != TOTP_DIGITS or not secret:
+        return None
+    current = int((now if now is not None else time.time()) // TOTP_STEP)
+    for counter in (current - 1, current, current + 1):
+        if last_counter is not None and counter <= last_counter:
+            continue
+        if hmac.compare_digest(_totp_at(secret, counter), code):
+            return counter
+    return None
+
+
+def totp_uri(secret, email, issuer="VC CRM"):
+    from urllib.parse import quote
+    return (f"otpauth://totp/{quote(issuer)}:{quote(email)}?secret={secret}"
+            f"&issuer={quote(issuer)}&digits={TOTP_DIGITS}&period={TOTP_STEP}")
+
+
+def new_recovery_codes(n=10):
+    """Human-friendly one-time codes like 'k3vx-9qtm'."""
+    alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+    return ["-".join("".join(secrets.choice(alphabet) for _ in range(4)) for _ in range(2))
+            for _ in range(n)]
+
+
+def normalize_recovery_code(code):
+    return "".join(ch for ch in str(code or "").lower() if ch.isalnum())
+
+
+# ---------------------------------------------------------------- API tokens
+
+TOKEN_PREFIX = "crm_"
+
+
+def new_api_token():
+    return TOKEN_PREFIX + secrets.token_urlsafe(32)

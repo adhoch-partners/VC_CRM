@@ -1,13 +1,15 @@
 import json
 import os
 from datetime import date, timedelta
+from types import SimpleNamespace
 from pathlib import Path
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, metrics
+from . import auth, mailer, metrics
+from . import security
 from .access import LEVELS, Access, deny
 from .db import Database, IntegrityError
 from .entities import CAPITAL_EVENT_FIELDS, DEAL_STAGES, ENTITIES, LP_STAGES
@@ -133,12 +135,29 @@ def public_user(u):
     return {k: u[k] for k in ("id", "email", "name", "role")}
 
 
-def create_app(database_url=None, cookie_secure=None, session_days=None):
+SECRET_USER_FIELDS = {"password_hash", "totp_secret", "totp_pending_secret", "totp_last_counter"}
+
+
+def safe_user(row):
+    return {k: v for k, v in row.items() if k not in SECRET_USER_FIELDS}
+
+
+def get_setting(conn, key, default=None):
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def require_2fa(conn):
+    return get_setting(conn, "require_2fa") == "1"
+
+
+def create_app(database_url=None, cookie_secure=None, session_days=None, send_email=None):
     db = Database(database_url)
     db.init()
     cookie_secure = env_flag("COOKIE_SECURE") if cookie_secure is None else cookie_secure
     session_days = session_days or int(os.environ.get("SESSION_DAYS", "7"))
     throttle = auth.LoginThrottle()
+    send_email = send_email or mailer.send
     bootstrap_admin(db)
 
     app = FastAPI(title="VC CRM", docs_url=None, redoc_url=None, openapi_url=None)
@@ -167,10 +186,20 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
             raise HTTPException(403, "Missing X-CRM request header")
 
     def current_user(request: Request, conn=Depends(get_conn)):
-        check_csrf(request)
-        user = auth.session_user(conn, request.cookies.get(auth.COOKIE))
-        if not user:
-            raise HTTPException(401, "Not signed in")
+        bearer = request.headers.get("authorization", "")
+        if bearer.lower().startswith("bearer "):
+            # API tokens are not sent automatically by browsers, so no CSRF check needed.
+            user = auth.token_user(conn, bearer[7:].strip())
+            if not user:
+                raise HTTPException(401, "Invalid or revoked API token")
+        else:
+            check_csrf(request)
+            user = auth.session_user(conn, request.cookies.get(auth.COOKIE))
+            if not user:
+                raise HTTPException(401, "Not signed in")
+        if (not user["totp_enabled"] and not request.url.path.startswith("/api/auth/")
+                and require_2fa(conn)):
+            raise HTTPException(403, "Two-factor authentication must be set up first")
         return user
 
     def role(minimum):
@@ -196,6 +225,22 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
             raise HTTPException(404, "Not found")
         return dict(row)
 
+    def start_session(response, conn, row):
+        conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?",
+                     (auth.iso(auth.utcnow()), row["id"]))
+        token = auth.create_session(conn, row["id"], session_days)
+        response.set_cookie(auth.COOKIE, token, max_age=session_days * 86400, httponly=True,
+                            secure=cookie_secure, samesite="lax", path="/")
+        return {**public_user(row), **Access(conn, row).summary()}
+
+    # Shared helpers handed to the feature modules that register their own routes.
+    deps = SimpleNamespace(
+        get_conn=get_conn, viewer=viewer, admin=admin, get_access=get_access, fetch=fetch,
+        check_csrf=check_csrf, start_session=start_session, throttle=throttle, audit=audit,
+        send_email=send_email, cookie_secure=cookie_secure, coerce=coerce,
+        entity_meta=entity_meta, related=related, integrity=_integrity,
+    )
+
     # ------------------------------------------------------------ health
 
     @app.get("/healthz")
@@ -220,12 +265,11 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
             throttle.fail(*keys)
             raise HTTPException(401, "Invalid email or password")
         throttle.clear(keys[0])
-        conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?",
-                     (auth.iso(auth.utcnow()), row["id"]))
-        token = auth.create_session(conn, row["id"], session_days)
-        response.set_cookie(auth.COOKIE, token, max_age=session_days * 86400, httponly=True,
-                            secure=cookie_secure, samesite="lax", path="/")
-        return {**public_user(row), **Access(conn, row).summary()}
+        if row["totp_enabled"]:
+            # Password is right; the session starts only after the authenticator code.
+            challenge = security.new_challenge(conn, row["id"])
+            return {"twofa_required": True, "challenge": challenge}
+        return start_session(response, conn, row)
 
     @app.post("/api/auth/logout", status_code=204)
     def logout(request: Request, response: Response, conn=Depends(get_conn)):
@@ -236,8 +280,11 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         response.delete_cookie(auth.COOKIE, path="/")
 
     @app.get("/api/auth/me")
-    def me(acc=Depends(get_access)):
-        return {**public_user(acc.user), **acc.summary()}
+    def me(acc=Depends(get_access), conn=Depends(get_conn)):
+        required = require_2fa(conn)
+        return {**public_user(acc.user), **acc.summary(),
+                "totp_enabled": bool(acc.user["totp_enabled"]), "require_2fa": required,
+                "must_enroll_2fa": required and not acc.user["totp_enabled"]}
 
     @app.post("/api/auth/password", status_code=204)
     def change_password(request: Request, data: dict = Body(...), user=Depends(viewer),
@@ -270,7 +317,8 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         for r in conn.execute("SELECT user_id, fund_id, level FROM fund_access"):
             grants.setdefault(r["user_id"], {})[str(r["fund_id"])] = r["level"]
         return [{**dict(r), "fund_access": grants.get(r["id"], {})} for r in conn.execute(
-            "SELECT id, email, name, role, active, last_login_at, created_at FROM users "
+            "SELECT id, email, name, role, active, totp_enabled, last_login_at, created_at "
+            "FROM users "
             "ORDER BY name")]
 
     @app.get("/api/users/directory")
@@ -296,13 +344,13 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
                                                            "role": role_})
         except IntegrityError:
             raise HTTPException(409, "A user with that email already exists")
-        return {k: v for k, v in fetch(conn, "users", uid).items() if k != "password_hash"}
+        return safe_user(fetch(conn, "users", uid))
 
     @app.patch("/api/users/{uid}")
     def update_user(uid: int, data: dict = Body(...), user=Depends(admin),
                     conn=Depends(get_conn)):
         target = fetch(conn, "users", uid)
-        unknown = set(data) - {"name", "role", "active", "password"}
+        unknown = set(data) - {"name", "role", "active", "password", "reset_2fa"}
         if unknown:
             raise HTTPException(400, f"Unknown field(s): {', '.join(sorted(unknown))}")
         changes = {}
@@ -328,14 +376,23 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
             changes["password_hash"] = auth.hash_password(data["password"])
             logged["password"] = "reset"
             revoke = True
+        if data.get("reset_2fa"):
+            # Lost phone: clear the authenticator; they set it up again at next sign-in.
+            changes.update(totp_enabled=0, totp_secret=None, totp_pending_secret=None,
+                           totp_last_counter=None)
+            logged = {k: v for k, v in logged.items() if not k.startswith("totp")}
+            logged["two_factor"] = "reset"
+            revoke = True
         if changes:
             with conn.transaction():
                 conn.execute(f"UPDATE users SET {', '.join(f'{k} = ?' for k in changes)} "
                              f"WHERE id = ?", [*changes.values(), uid])
                 if revoke:
                     conn.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+                if data.get("reset_2fa"):
+                    conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (uid,))
                 audit(conn, user, "update", "users", uid, logged)
-        return {k: v for k, v in fetch(conn, "users", uid).items() if k != "password_hash"}
+        return safe_user(fetch(conn, "users", uid))
 
     @app.get("/api/users/{uid}/funds")
     def get_fund_access(uid: int, user=Depends(admin), conn=Depends(get_conn)):
@@ -594,6 +651,12 @@ def create_app(database_url=None, cookie_secure=None, session_days=None):
         with conn.transaction():
             conn.execute("DELETE FROM capital_events WHERE id = ?", (eid,))
             audit(conn, acc.user, "delete", "capital_events", eid, old, record=old)
+
+    # ------------------------------------------------------------ feature modules
+    # Registered before the generic /api/{entity} routes so their paths win.
+
+    deps.visible_row = lambda conn, acc, entity, rid: visible_row(conn, acc, entity, rid)
+    security.register(app, deps)
 
     # ------------------------------------------------------------ generic CRUD
 

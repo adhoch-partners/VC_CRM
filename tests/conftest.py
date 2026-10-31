@@ -31,8 +31,15 @@ def database_url(request, tmp_path):
 
 
 @pytest.fixture
-def app(database_url):
-    return create_app(database_url, cookie_secure=False)
+def outbox():
+    """Emails the app 'sent' during the test: (to, subject, body)."""
+    return []
+
+
+@pytest.fixture
+def app(database_url, outbox):
+    return create_app(database_url, cookie_secure=False,
+                      send_email=lambda to, subject, body: outbox.append((to, subject, body)) or True)
 
 
 def add_user(database_url, email, role, password=PASSWORD):

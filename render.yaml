@@ -16,6 +16,14 @@ services:
         value: "true"
       - key: SESSION_DAYS
         value: "7"
+      # Public address used in email links, e.g. https://crm.yourfirm.com
+      - key: APP_URL
+        sync: false
+      # Google Workspace mailbox + app password for reset emails and task reminders
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
       - key: ADMIN_NAME
         sync: false
       - key: ADMIN_EMAIL

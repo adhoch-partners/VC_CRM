@@ -135,6 +135,14 @@ pytest
 | `COOKIE_SECURE` | `false` | Set `true` whenever served over HTTPS (always in production). |
 | `SESSION_DAYS` | `7` | How long a sign-in lasts. |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME` | unset | Create the first admin, only when no users exist. |
+| `APP_URL` | `http://localhost:8000` | The app's public address, used in links in emails (e.g. `https://crm.yourfirm.com`). |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | unset | Google Workspace mailbox and its **app password** for sending reset emails and task reminders. Without them, emails are written to the server log instead. |
+| `MAIL_FROM`, `SMTP_HOST`, `SMTP_PORT` | username, `smtp.gmail.com`, `587` | Optional overrides. |
+
+**Setting up Google Workspace email:** use a mailbox such as `crm@yourfirm.com`. Turn on 2-Step
+Verification for that account, then create an app password at myaccount.google.com > Security >
+App passwords and put it in `SMTP_PASSWORD`. Workspace accounts can send roughly 2,000 emails a
+day, far more than this app needs.
 
 ## Permissions
 
@@ -190,6 +198,17 @@ Things to be aware of:
 ## Security model
 
 - Passwords are hashed with scrypt; minimum 10 characters.
+- **Two-factor sign-in** (authenticator app codes, RFC 6238). Each user turns it on under
+  **Security** at the bottom of the sidebar and gets 10 one-time recovery codes. Admins can require
+  it for everyone (Admin > Users), which sends anyone without it to setup at their next click, and
+  can reset it for someone who lost their phone. Codes cannot be reused, and wrong codes are
+  throttled like passwords.
+- **Forgot password** on the sign-in screen emails a link valid for 60 minutes and usable once.
+  It never reveals whether an email has an account. Resetting signs the person out everywhere;
+  two-factor is still required afterwards.
+- **API tokens** (Security > API tokens) let scripts, or Claude logging meeting notes, act as you
+  with your permissions. Send as `Authorization: Bearer crm_...`. Only a hash is stored; the
+  token is shown once, and you can see when each was last used and revoke it.
 - Sign-in sets an HttpOnly, SameSite=Lax cookie (Secure in production). The database stores
   only a SHA-256 of the session token, so sessions can be revoked and a database copy cannot be
   used to sign in.
@@ -203,8 +222,7 @@ Things to be aware of:
 - Security headers: Content-Security-Policy, X-Frame-Options DENY, nosniff, HSTS (production),
   and `Cache-Control: no-store` on all data responses. The interactive API docs are disabled.
 - The Postgres database in the Blueprint accepts connections only from your Render services.
-- Not included: two-factor authentication, single sign-on, or password-reset emails.
-  Ask if you need these.
+- Not included: single sign-on (Google / Microsoft login). Ask if you need it.
 
 ## Screens
 
@@ -279,7 +297,11 @@ IRR on positions held for less than a year is annualised and can look extreme (f
 All screens use a JSON API. Every endpoint except `POST /api/auth/login` and `GET /healthz`
 needs a signed-in session cookie, and writes need the `X-CRM: 1` header.
 
-- `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`, `POST /api/auth/password`.
+- `POST /api/auth/login` (returns `twofa_required` + `challenge` when two-factor is on, then
+  `POST /api/auth/2fa` with `{challenge, code}`), `POST /api/auth/logout`, `GET /api/auth/me`,
+  `POST /api/auth/password`, `POST /api/auth/forgot`, `POST /api/auth/reset`.
+- Two-factor: `POST /api/auth/2fa/setup`, `/enable`, `/disable`, `/recovery-codes`.
+- API tokens: `GET/POST /api/tokens`, `DELETE /api/tokens/{id}`. Admin settings: `GET/PUT /api/settings`.
 - Admins: `GET/POST /api/users`, `PATCH /api/users/{id}` (`name`, `role`, `active`, `password`).
 - Admins: `GET/PUT /api/users/{id}/funds` with `{"<fund_id>": "viewer" | "editor"}` (omitted funds = no access).
 - Every record returned carries `_can_edit` and `_can_delete` for the signed-in user.
